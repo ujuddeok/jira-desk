@@ -1,0 +1,531 @@
+[
+  {
+    "comment": "Whole app. `cmd` means Cmd on macOS and Ctrl elsewhere.",
+    "context": "JiraDesk",
+    "bindings": {
+      "cmd-r": "jdesk::Refresh",
+      "cmd-shift-r": "jdesk::FullRefresh",
+      "cmd-shift-a": "jdesk::ApplyAll",
+      "cmd-o": "jdesk::GoToIssue",
+      "shift-/": "jdesk::ShowHelp",
+      "cmd-/": "jdesk::ShowHelp",
+      "cmd-q": "jdesk::Quit",
+      "alt-1": "jdesk::FocusFilters",
+      "alt-2": "jdesk::FocusIssues",
+      "alt-3": "jdesk::FocusPreview",
+      "alt-4": "jdesk::FocusNotes",
+      "alt-5": "jdesk::FocusChanges",
+      "alt-6": "jdesk::OpenBoard",
+      "?": "jdesk::ShowHelp",
+      "cmd-p": "jdesk::GoToIssue",
+      "cmd-,": "jdesk::ShowSettings",
+      "cmd-shift-p": "jdesk::ShowPalette"
+    }
+  },
+  {
+    "comment": "Moving in the focused pane (Vim keys and arrows).",
+    "context": "JiraDesk",
+    "bindings": {
+      "down": "jdesk::CursorDown",
+      "j": "jdesk::CursorDown",
+      "up": "jdesk::CursorUp",
+      "k": "jdesk::CursorUp",
+      "home": "jdesk::CursorTop",
+      "g g": "jdesk::CursorTop",
+      "end": "jdesk::CursorBottom",
+      "shift-g": "jdesk::CursorBottom",
+      "pagedown": "jdesk::PageDown",
+      "ctrl-d": "jdesk::PageDown",
+      "pageup": "jdesk::PageUp",
+      "ctrl-u": "jdesk::PageUp",
+      "enter": "jdesk::Confirm",
+      "space": "jdesk::Toggle"
+    }
+  },
+  {
+    "comment": "Filters: the list follows them at once. `f` starts each one.",
+    "context": "JiraDesk",
+    "bindings": {
+      "cmd-f": "jdesk::Search",
+      "/": "jdesk::Search",
+      "f s": "jdesk::FilterSprint",
+      "f a": "jdesk::FilterAssignee",
+      "f l": "jdesk::FilterLabel",
+      "f e": "jdesk::FilterEpic",
+      "f t": "jdesk::FilterStatus",
+      "f m": "jdesk::ToggleMine",
+      "f d": "jdesk::ToggleHideDone",
+      "f *": "jdesk::ToggleStarredOnly",
+      "f 8": "jdesk::ToggleStarredOnly",
+      "f n": "jdesk::ToggleNotedOnly",
+      "f q": "jdesk::TogglePendingOnly",
+      "f x": "jdesk::ClearFilters",
+      "f o": "jdesk::ChooseSort",
+      "f g": "jdesk::FilterTags",
+      "f shift-t": "jdesk::FilterTags",
+      "f v": "jdesk::ToggleReviewOnly"
+    }
+  },
+  {
+    "comment": "The current issue: each change is queued, and sent only when you apply the queue.",
+    "context": "JiraDesk",
+    "bindings": {
+      "t": "jdesk::Transition",
+      "a": "jdesk::Assign",
+      "i": "jdesk::AssignToMe",
+      "shift-l": "jdesk::EditLabels",
+      "c": "jdesk::Comment",
+      "r": "jdesk::Rename",
+      "p": "jdesk::SetPoints",
+      "shift-p": "jdesk::SetPriority",
+      "m": "jdesk::MoveToSprint",
+      "u": "jdesk::UndoChange",
+      "s": "jdesk::ToggleStar",
+      "n": "jdesk::EditNote",
+      "o": "jdesk::OpenIssueTab",
+      "shift-o": "jdesk::OpenInBrowser",
+      "y": "jdesk::CopyKey",
+      "shift-y": "jdesk::CopyLink",
+      "shift-t": "jdesk::EditTags",
+      "x": "jdesk::TogglePick",
+      "shift-x": "jdesk::ClearPicks",
+      "shift-f": "jdesk::FocusSeries",
+      "v": "jdesk::ResolveReview"
+    }
+  },
+  {
+    "comment": "The board: columns left and right.",
+    "context": "JiraDesk && board",
+    "bindings": {
+      "left": "jdesk::CursorLeft",
+      "h": "jdesk::CursorLeft",
+      "right": "jdesk::CursorRight",
+      "l": "jdesk::CursorRight"
+    }
+  },
+  {
+    "comment": "The Changes pane.",
+    "context": "JiraDesk && changes",
+    "bindings": {
+      "enter": "jdesk::ApplySelected",
+      "backspace": "jdesk::DiscardChange",
+      "d": "jdesk::DiscardChange",
+      "r": "jdesk::RetryChange",
+      "shift-r": "jdesk::ForceChange",
+      "shift-c": "jdesk::ClearHistory"
+    }
+  },
+  {
+    "comment": "In a focus layout (a maximised pane or a focus series): ] and [ step pages; Tab and Shift-Tab bring the next issue from the tray into the focused spot.",
+    "context": "JiraDesk && focus",
+    "bindings": {
+      "]": "chorong::NextFocusPage",
+      "[": "chorong::PrevFocusPage",
+      "tab": "chorong::NextTrayFile",
+      "shift-tab": "chorong::PrevTrayFile"
+    }
+  },
+  {
+    "comment": "The Notes pane.",
+    "context": "JiraDesk && notes",
+    "bindings": {
+      "enter": "jdesk::EditNote"
+    }
+  },
+  {
+    "comment": "The Settings pane: measure the data folder again, clear downloaded images, copy the folder's path.",
+    "context": "JiraDesk && settings",
+    "bindings": {
+      "r": "jdesk::MeasureStorage",
+      "shift-d": "jdesk::ClearImages",
+      "y": "jdesk::CopyDataPath"
+    }
+  },
+  {
+    "comment": "The search bar (/ or Cmd-F): a field word (or two letters of one) then Tab or : opens a chip; Tab or Enter takes a value; Shift-Tab reopens the last chip; Esc steps back.",
+    "context": "JiraSearch",
+    "bindings": {
+      "tab": "jdesk::SearchTab",
+      "shift-tab": "jdesk::SearchReopen",
+      "escape": "jdesk::InputCancel",
+      "enter": "jdesk::InputConfirm",
+      "cmd-enter": "jdesk::InputSubmit",
+      "up": "jdesk::InputUp",
+      "down": "jdesk::InputDown",
+      "ctrl-p": "jdesk::InputUp",
+      "ctrl-n": "jdesk::InputDown"
+    }
+  },
+  {
+    "comment": "A one-line field or a picker.",
+    "context": "JiraInput",
+    "bindings": {
+      "escape": "jdesk::InputCancel",
+      "enter": "jdesk::InputConfirm",
+      "shift-enter": "jdesk::InputConfirmAlt",
+      "cmd-enter": "jdesk::InputSubmit",
+      "up": "jdesk::InputUp",
+      "down": "jdesk::InputDown",
+      "ctrl-p": "jdesk::InputUp",
+      "ctrl-n": "jdesk::InputDown",
+      "tab": "jdesk::InputDown",
+      "shift-tab": "jdesk::InputUp"
+    }
+  },
+  {
+    "comment": "A multi-line field (comment, note). Enter starts a new line.",
+    "context": "JiraText",
+    "bindings": {
+      "escape": "jdesk::InputCancel",
+      "cmd-enter": "jdesk::InputSubmit",
+      "cmd-s": "jdesk::InputSubmit"
+    }
+  },
+  {
+    "comment": "Layout, as in Chorong. Layout actions in Zed's keymap format (context, then keystroke -> action). `cmd` means Cmd on macOS and Ctrl elsewhere. Keys follow design/layout.md. MinimizePane, ReopenFocusLayout and the dock toggles have no key there, so they stay unbound (reachable from the pane menu, the status bar and the focus-history button). On integration these bindings move into app/keymap/default.json.",
+    "context": "JiraDesk",
+    "bindings": {
+      "cmd-k m": "chorong::ToggleMaximizePane",
+      "escape": "chorong::RestoreLayout"
+    }
+  },
+  {
+    "comment": "Layout, as in Chorong. Focus pages, as the owner approved them (Cmd-K R, reset page, comes with tour pages).",
+    "context": "JiraDesk",
+    "bindings": {
+      "cmd-k ]": "chorong::NextFocusPage",
+      "cmd-k [": "chorong::PrevFocusPage",
+      "cmd-k shift-n": "chorong::NewFocusPage",
+      "cmd-k 1": [
+        "chorong::GoToFocusPage",
+        1
+      ],
+      "cmd-k 2": [
+        "chorong::GoToFocusPage",
+        2
+      ],
+      "cmd-k 3": [
+        "chorong::GoToFocusPage",
+        3
+      ],
+      "cmd-k 4": [
+        "chorong::GoToFocusPage",
+        4
+      ],
+      "cmd-k 5": [
+        "chorong::GoToFocusPage",
+        5
+      ],
+      "cmd-k 6": [
+        "chorong::GoToFocusPage",
+        6
+      ],
+      "cmd-k 7": [
+        "chorong::GoToFocusPage",
+        7
+      ],
+      "cmd-k 8": [
+        "chorong::GoToFocusPage",
+        8
+      ],
+      "cmd-k 9": [
+        "chorong::GoToFocusPage",
+        9
+      ]
+    }
+  },
+  {
+    "comment": "Layout, as in Chorong. Keyboard layout (design/layout-keyboard.md, decided): direct chords in the window.",
+    "context": "JiraDesk",
+    "bindings": {
+      "cmd-k cmd-left": "chorong::FocusPaneLeft",
+      "cmd-k cmd-right": "chorong::FocusPaneRight",
+      "cmd-k cmd-up": "chorong::FocusPaneUp",
+      "cmd-k cmd-down": "chorong::FocusPaneDown",
+      "cmd-1": [
+        "chorong::FocusEditorGroup",
+        1
+      ],
+      "cmd-2": [
+        "chorong::FocusEditorGroup",
+        2
+      ],
+      "cmd-3": [
+        "chorong::FocusEditorGroup",
+        3
+      ],
+      "cmd-4": [
+        "chorong::FocusEditorGroup",
+        4
+      ],
+      "cmd-5": [
+        "chorong::FocusEditorGroup",
+        5
+      ],
+      "cmd-6": [
+        "chorong::FocusEditorGroup",
+        6
+      ],
+      "cmd-7": [
+        "chorong::FocusEditorGroup",
+        7
+      ],
+      "cmd-8": [
+        "chorong::FocusEditorGroup",
+        8
+      ],
+      "cmd-9": [
+        "chorong::FocusEditorGroup",
+        9
+      ],
+      "cmd-b": "chorong::ToggleLeftDock",
+      "cmd-alt-b": "chorong::ToggleRightDock",
+      "cmd-j": "chorong::ToggleBottomBar",
+      "cmd-alt-y": "chorong::ToggleAllDocks",
+      "cmd-\\": "chorong::SplitPaneRight",
+      "cmd-k left": "chorong::SplitPaneLeft",
+      "cmd-k right": "chorong::SplitPaneRight",
+      "cmd-k up": "chorong::SplitPaneUp",
+      "cmd-k down": "chorong::SplitPaneDown",
+      "shift-escape": "chorong::ToggleMaximizePane",
+      "cmd-k n": "chorong::MinimizePane",
+      "cmd-k z": "chorong::UndoLayout",
+      "cmd-k shift-z": "chorong::RedoLayout",
+      "cmd-k space": "chorong::EnterLayoutMode",
+      "w": "chorong::EnterLayoutMode",
+      "cmd-w": "chorong::ClosePane"
+    }
+  },
+  {
+    "comment": "Layout, as in Chorong. Layout mode: exclusive, entered with w or Cmd-K Space; its hint bar has this context. Jump labels: 1-9 editor groups, then home-row letters.",
+    "context": "LayoutMode",
+    "bindings": {
+      "left": "chorong::FocusPaneLeft",
+      "right": "chorong::FocusPaneRight",
+      "up": "chorong::FocusPaneUp",
+      "down": "chorong::FocusPaneDown",
+      "shift-left": "chorong::MovePaneLeft",
+      "shift-right": "chorong::MovePaneRight",
+      "shift-up": "chorong::MovePaneUp",
+      "shift-down": "chorong::MovePaneDown",
+      "alt-left": "chorong::MoveGroupLeft",
+      "alt-right": "chorong::MoveGroupRight",
+      "alt-up": "chorong::MoveGroupUp",
+      "alt-down": "chorong::MoveGroupDown",
+      "tab": "chorong::NextTrayFile",
+      "shift-tab": "chorong::PrevTrayFile",
+      "1": [
+        "chorong::FocusEditorGroup",
+        1
+      ],
+      "2": [
+        "chorong::FocusEditorGroup",
+        2
+      ],
+      "3": [
+        "chorong::FocusEditorGroup",
+        3
+      ],
+      "4": [
+        "chorong::FocusEditorGroup",
+        4
+      ],
+      "5": [
+        "chorong::FocusEditorGroup",
+        5
+      ],
+      "6": [
+        "chorong::FocusEditorGroup",
+        6
+      ],
+      "7": [
+        "chorong::FocusEditorGroup",
+        7
+      ],
+      "8": [
+        "chorong::FocusEditorGroup",
+        8
+      ],
+      "9": [
+        "chorong::FocusEditorGroup",
+        9
+      ],
+      "a": [
+        "chorong::FocusLabel",
+        "a"
+      ],
+      "d": [
+        "chorong::FocusLabel",
+        "d"
+      ],
+      "f": [
+        "chorong::FocusLabel",
+        "f"
+      ],
+      "g": [
+        "chorong::FocusLabel",
+        "g"
+      ],
+      "j": [
+        "chorong::FocusLabel",
+        "j"
+      ],
+      "k": [
+        "chorong::FocusLabel",
+        "k"
+      ],
+      "l": [
+        "chorong::FocusLabel",
+        "l"
+      ],
+      ";": [
+        "chorong::FocusLabel",
+        ";"
+      ],
+      "e": [
+        "chorong::FocusLabel",
+        "e"
+      ],
+      "i": [
+        "chorong::FocusLabel",
+        "i"
+      ],
+      "o": [
+        "chorong::FocusLabel",
+        "o"
+      ],
+      "q": [
+        "chorong::FocusLabel",
+        "q"
+      ],
+      "c": [
+        "chorong::FocusLabel",
+        "c"
+      ],
+      "z": [
+        "chorong::FocusLabel",
+        "z"
+      ],
+      "y": [
+        "chorong::FocusLabel",
+        "y"
+      ],
+      "v": "chorong::SplitPaneRight",
+      "s": "chorong::SplitPaneDown",
+      "r": "chorong::EnterResizeMode",
+      "=": "chorong::EqualizePanes",
+      "m": "chorong::ToggleMaximizePane",
+      "n": "chorong::MinimizePane",
+      "t": "chorong::SendPaneToTray",
+      "x": "chorong::ClosePane",
+      "p": "chorong::MovePaneTo",
+      "b": "chorong::BringFromTray",
+      "h": "chorong::ReopenFocusLayout",
+      "u": "chorong::UndoLayout",
+      "shift-u": "chorong::RedoLayout",
+      "w": "chorong::ExitLayoutMode",
+      "enter": "chorong::ExitLayoutMode",
+      "escape": "chorong::ExitLayoutMode"
+    }
+  },
+  {
+    "comment": "Layout, as in Chorong. The resize sub-mode (r in Layout mode). Later sections win, so these arrows resize.",
+    "context": "LayoutMode && resize",
+    "bindings": {
+      "left": [
+        "chorong::ResizePane",
+        {
+          "direction": "left"
+        }
+      ],
+      "shift-left": [
+        "chorong::ResizePane",
+        {
+          "direction": "left",
+          "fine": true
+        }
+      ],
+      "right": [
+        "chorong::ResizePane",
+        {
+          "direction": "right"
+        }
+      ],
+      "shift-right": [
+        "chorong::ResizePane",
+        {
+          "direction": "right",
+          "fine": true
+        }
+      ],
+      "up": [
+        "chorong::ResizePane",
+        {
+          "direction": "up"
+        }
+      ],
+      "shift-up": [
+        "chorong::ResizePane",
+        {
+          "direction": "up",
+          "fine": true
+        }
+      ],
+      "down": [
+        "chorong::ResizePane",
+        {
+          "direction": "down"
+        }
+      ],
+      "shift-down": [
+        "chorong::ResizePane",
+        {
+          "direction": "down",
+          "fine": true
+        }
+      ],
+      "=": "chorong::EqualizePanes",
+      "enter": "chorong::ExitResizeMode",
+      "escape": "chorong::ExitResizeMode"
+    }
+  },
+  {
+    "comment": "Layout, as in Chorong. Pane pickers, the Ctrl-Tab switcher and dock sizes, as in the viewer (the shell's overlay has the key context `Chorong PanePicker` / `Chorong PaneSwitcher`, so the lab repeats Ctrl-Tab there).",
+    "context": "JiraDesk",
+    "bindings": {
+      "cmd-k /": "chorong::FocusPane",
+      "cmd-k a": "chorong::BringFromTray",
+      "ctrl-tab": "chorong::OpenSwitcher",
+      "ctrl-shift-tab": "chorong::OpenSwitcherReverse",
+      "ctrl-alt-=": "chorong::GrowDock",
+      "ctrl-alt--": "chorong::ShrinkDock",
+      "ctrl-alt-0": "chorong::ResetDockSize"
+    }
+  },
+  {
+    "comment": "Layout, as in Chorong. ",
+    "context": "PanePicker",
+    "bindings": {
+      "up": "chorong::PaneListPrev",
+      "down": "chorong::PaneListNext",
+      "enter": "chorong::PaneListConfirm",
+      "shift-enter": "chorong::PaneListConfirmAlt",
+      "tab": "chorong::PaneListTab",
+      "escape": "chorong::PaneListClose"
+    }
+  },
+  {
+    "comment": "Layout, as in Chorong. ",
+    "context": "PaneSwitcher",
+    "bindings": {
+      "ctrl-tab": "chorong::OpenSwitcher",
+      "ctrl-shift-tab": "chorong::OpenSwitcherReverse",
+      "up": "chorong::PaneListPrev",
+      "down": "chorong::PaneListNext",
+      "left": "chorong::PaneListPrev",
+      "right": "chorong::PaneListNext",
+      "enter": "chorong::PaneListConfirm",
+      "escape": "chorong::PaneListClose"
+    }
+  }
+]

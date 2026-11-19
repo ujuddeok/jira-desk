@@ -1,0 +1,60 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1024" height="1024" viewBox="0 0 1024 1024">
+  <defs>
+    <linearGradient id="b-tile" x1="0" y1="0" x2="0.4" y2="1">
+      <stop offset="0" stop-color="#14505c"/><stop offset="1" stop-color="#061c22"/>
+    </linearGradient>
+    <radialGradient id="b-glow" cx="0.5" cy="0.5" r="0.5">
+      <stop offset="0" stop-color="#ffcf6e" stop-opacity="0.7"/>
+      <stop offset="1" stop-color="#ffcf6e" stop-opacity="0"/>
+    </radialGradient>
+    <filter id="b-shadow" x="-30%" y="-30%" width="160%" height="180%"><feGaussianBlur stdDeviation="9"/></filter>
+  </defs>
+  <rect x="100" y="100" width="824" height="824" rx="185" fill="url(#b-tile)"/>
+  <!-- column wells -->
+  <g fill="#ffffff" fill-opacity="0.06">
+    <rect x="196" y="236" width="196" height="560" rx="34"/>
+    <rect x="414" y="236" width="196" height="560" rx="34"/>
+    <rect x="632" y="236" width="196" height="560" rx="34"/>
+  </g>
+  <g fill="#ffffff" fill-opacity="0.35">
+    <rect x="226" y="262" width="80" height="14" rx="7"/>
+    <rect x="444" y="262" width="80" height="14" rx="7"/>
+    <rect x="662" y="262" width="80" height="14" rx="7"/>
+  </g>
+  <rect x="216" y="309" width="156" height="110" rx="20" fill="#000" opacity="0.35" filter="url(#b-shadow)"/><rect x="216" y="437" width="156" height="110" rx="20" fill="#000" opacity="0.35" filter="url(#b-shadow)"/><rect x="216" y="565" width="156" height="110" rx="20" fill="#000" opacity="0.35" filter="url(#b-shadow)"/><rect x="434" y="309" width="156" height="110" rx="20" fill="#000" opacity="0.35" filter="url(#b-shadow)"/><rect x="652" y="309" width="156" height="110" rx="20" fill="#000" opacity="0.35" filter="url(#b-shadow)"/><rect x="652" y="437" width="156" height="110" rx="20" fill="#000" opacity="0.35" filter="url(#b-shadow)"/>
+  <g>
+    <!-- to do -->
+    <rect x="216" y="300" width="156" height="110" rx="20" fill="#eef3f1"/>
+    <rect x="216" y="428" width="156" height="110" rx="20" fill="#eef3f1"/>
+    <rect x="216" y="556" width="156" height="110" rx="20" fill="#eef3f1"/>
+    <!-- in progress -->
+    <rect x="434" y="300" width="156" height="110" rx="20" fill="#eef3f1"/>
+    <!-- done -->
+    <rect x="652" y="300" width="156" height="110" rx="20" fill="#c9d8d4"/>
+    <rect x="652" y="428" width="156" height="110" rx="20" fill="#c9d8d4"/>
+  </g>
+  <!-- chips -->
+  <g>
+    <rect x="236" y="320" width="34" height="34" rx="9" fill="#4cae6b"/>
+    <rect x="236" y="448" width="34" height="34" rx="9" fill="#e0605a"/>
+    <rect x="236" y="576" width="34" height="34" rx="9" fill="#4f8ff0"/>
+    <rect x="454" y="320" width="34" height="34" rx="9" fill="#4cae6b"/>
+    <rect x="672" y="320" width="34" height="34" rx="9" fill="#7fa79f"/>
+    <rect x="672" y="448" width="34" height="34" rx="9" fill="#7fa79f"/>
+  </g>
+  <g fill="#9fb3ae">
+    <rect x="236" y="372" width="112" height="12" rx="6"/><rect x="236" y="500" width="96" height="12" rx="6"/>
+    <rect x="236" y="628" width="104" height="12" rx="6"/><rect x="454" y="372" width="100" height="12" rx="6"/>
+    <rect x="672" y="372" width="90" height="12" rx="6"/><rect x="672" y="500" width="110" height="12" rx="6"/>
+  </g>
+  <!-- the card on its way: lifted, lit -->
+  <ellipse cx="512" cy="560" rx="170" ry="120" fill="url(#b-glow)"/>
+  <g transform="rotate(-7 512 540)">
+    <rect x="428" y="496" width="168" height="120" rx="22" fill="#000" opacity="0.45" filter="url(#b-shadow)"/>
+    <rect x="428" y="480" width="168" height="120" rx="22" fill="#fffaf0"/>
+    <rect x="450" y="502" width="36" height="36" rx="9" fill="#e0605a"/>
+    <rect x="450" y="556" width="118" height="13" rx="6.5" fill="#b9ad95"/>
+  </g>
+  <circle cx="586" cy="484" r="20" fill="#ffcf6e" stroke="#061c22" stroke-width="6"/>
+  <rect x="101.5" y="101.5" width="821" height="821" rx="184" fill="none" stroke="#ffffff" stroke-opacity="0.08" stroke-width="3"/>
+</svg>

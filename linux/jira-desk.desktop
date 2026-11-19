@@ -1,0 +1,8 @@
+[Desktop Entry]
+Type=Application
+Name=Jira Desk
+Comment=Your Jira, offline, with a queue of changes
+Exec=jira-desk %u
+Terminal=false
+Categories=Development;
+MimeType=x-scheme-handler/jiradesk;

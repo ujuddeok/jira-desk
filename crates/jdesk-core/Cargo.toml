@@ -1,0 +1,31 @@
+[package]
+name = "jdesk-core"
+description = "Jira Desk's engine: Jira client, local cache, sync, change queue and sidecar notes. No GPUI."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+publish.workspace = true
+license.workspace = true
+
+[[bin]]
+name = "jdesk"
+path = "src/bin/jdesk.rs"
+
+[dependencies]
+anyhow.workspace = true
+thiserror.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+ureq = { version = "2", features = ["json", "native-certs"] }
+base64 = "0.22"
+rusqlite = { version = "0.32", features = ["bundled"] }
+toml = "0.8"
+time = { version = "0.3", features = ["formatting", "parsing", "macros"] }
+
+[dev-dependencies]
+tempfile = "3"
+tiny_http = "0.12"
+image = { version = "0.25", default-features = false, features = ["png"] }
+
+[lints]
+workspace = true
