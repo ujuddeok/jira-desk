@@ -78,6 +78,10 @@ pub enum Event {
         key: String,
         outcome: crate::identity::ReviewStatus,
     },
+    /// A request as it is after a change (made, handed off, seen, confirmed, dropped).
+    Request {
+        request: crate::requests::Request,
+    },
     /// What a sync changed in the cache (keys only: the issues are Jira's).
     Synced {
         full: bool,
@@ -183,6 +187,8 @@ pub struct Rebuilt {
     pub notes: BTreeMap<String, String>,
     pub stars: BTreeMap<String, bool>,
     pub tags: BTreeMap<(String, String), bool>,
+    /// Each request as last recorded.
+    pub requests: BTreeMap<u64, crate::requests::Request>,
     pub entries: usize,
 }
 
@@ -226,6 +232,9 @@ pub fn replay(entries: &[Entry]) -> Rebuilt {
             }
             Event::Tag { key, tag, on } => {
                 r.tags.insert((key.clone(), tag.clone()), *on);
+            }
+            Event::Request { request } => {
+                r.requests.insert(request.id, request.clone());
             }
             Event::Synced { .. } | Event::ReviewRaised { .. } | Event::ReviewResolved { .. } => {}
         }
@@ -303,6 +312,9 @@ pub fn describe(e: &Entry) -> String {
             }
             crate::identity::ReviewStatus::Open => format!("review   {key} reopened"),
         },
+        Event::Request { request } => {
+            format!("request  {}: {}", request.describe(), request.state.word())
+        }
         Event::Synced {
             full,
             changed,

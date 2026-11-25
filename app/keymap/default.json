@@ -39,7 +39,17 @@
       "pageup": "jdesk::PageUp",
       "ctrl-u": "jdesk::PageUp",
       "enter": "jdesk::Confirm",
-      "space": "jdesk::Toggle"
+      "cmd-enter": "jdesk::OpenIssueRight",
+      "cmd-shift-enter": "jdesk::OpenIssueBelow",
+      "space": "jdesk::Toggle",
+      "shift-space": "jdesk::ToggleRange"
+    }
+  },
+  {
+    "comment": "The Filters pane: h hides the sprint on this row from the pane.",
+    "context": "JiraDesk && filters",
+    "bindings": {
+      "h": "jdesk::HideSprintRow"
     }
   },
   {
@@ -55,6 +65,42 @@
       "f t": "jdesk::FilterStatus",
       "f m": "jdesk::ToggleMine",
       "f d": "jdesk::ToggleHideDone",
+      "f 1": [
+        "jdesk::ToggleStatusGroup",
+        1
+      ],
+      "f 2": [
+        "jdesk::ToggleStatusGroup",
+        2
+      ],
+      "f 3": [
+        "jdesk::ToggleStatusGroup",
+        3
+      ],
+      "f 4": [
+        "jdesk::ToggleStatusGroup",
+        4
+      ],
+      "f 5": [
+        "jdesk::ToggleStatusGroup",
+        5
+      ],
+      "f 6": [
+        "jdesk::ToggleStatusGroup",
+        6
+      ],
+      "f 7": [
+        "jdesk::ToggleStatusGroup",
+        7
+      ],
+      "f 8": [
+        "jdesk::ToggleStatusGroup",
+        8
+      ],
+      "f 9": [
+        "jdesk::ToggleStatusGroup",
+        9
+      ],
       "f *": "jdesk::ToggleStarredOnly",
       "f 8": "jdesk::ToggleStarredOnly",
       "f n": "jdesk::ToggleNotedOnly",
@@ -62,6 +108,7 @@
       "f x": "jdesk::ClearFilters",
       "f o": "jdesk::ChooseSort",
       "f g": "jdesk::FilterTags",
+      "f r": "jdesk::ToggleRequestsOnly",
       "f shift-t": "jdesk::FilterTags",
       "f v": "jdesk::ToggleReviewOnly"
     }
@@ -87,6 +134,9 @@
       "y": "jdesk::CopyKey",
       "shift-y": "jdesk::CopyLink",
       "shift-t": "jdesk::EditTags",
+      "shift-r": "jdesk::AddRequest",
+      "shift-k": "jdesk::LinkIssue",
+      "shift-e": "jdesk::SetParent",
       "x": "jdesk::TogglePick",
       "shift-x": "jdesk::ClearPicks",
       "shift-f": "jdesk::FocusSeries",
@@ -126,6 +176,15 @@
     }
   },
   {
+    "comment": "The issue pane (Preview and issue tabs): its text can be selected with the mouse; these copy it and select it all.",
+    "context": "JiraDesk && issue",
+    "bindings": {
+      "cmd-c": "jdesk::CopySelection",
+      "cmd-shift-c": "jdesk::CopyWithLink",
+      "cmd-a": "jdesk::SelectAllText"
+    }
+  },
+  {
     "comment": "The Notes pane.",
     "context": "JiraDesk && notes",
     "bindings": {
@@ -137,6 +196,7 @@
     "context": "JiraDesk && settings",
     "bindings": {
       "r": "jdesk::MeasureStorage",
+      "a": "jdesk::ToggleAutoAdvance",
       "shift-d": "jdesk::ClearImages",
       "y": "jdesk::CopyDataPath"
     }

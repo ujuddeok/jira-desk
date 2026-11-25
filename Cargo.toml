@@ -17,9 +17,9 @@ serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 # The window layout (docks, splits, tabs, Layout mode, pickers) is Chorong's, from crates.io.
 # Pinned exactly: its API follows Chorong's needs and may change between releases.
-cho-layout = "=0.1.1"
-cho-layout-ui = "=0.1.1"
-cho-theme = "=0.1.1"
+cho-layout = "=0.1.2"
+cho-layout-ui = "=0.1.2"
+cho-theme = "=0.1.2"
 gpui = "0.2.2"
 
 [workspace.lints.rust]
@@ -27,11 +27,6 @@ unsafe_code = "forbid"
 
 [workspace.lints.clippy]
 all = { level = "warn", priority = -1 }
-
-# cho-layout-ui 0.1.1 debug-asserts that every icon it names is bundled, and "move" (the
-# Move pane to… list, w p) isn't: debug builds would panic there. The app serves the icon.
-[profile.dev.package.cho-layout-ui]
-debug-assertions = false
 
 # Dependencies optimised so the debug app stays smooth, without debug info (as in Chorong).
 [profile.dev.package."*"]

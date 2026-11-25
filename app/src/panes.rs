@@ -19,7 +19,7 @@ use cho_layout_ui::shell::PaneBodies;
 use gpui::{
     AnyElement, App, Entity, FontWeight, Hsla, InteractiveElement, IntoElement, ParentElement,
     ScrollHandle, SharedString, StatefulInteractiveElement, Styled, Window, div,
-    prelude::FluentBuilder, px, uniform_list,
+    prelude::FluentBuilder, px,
 };
 use jdesk_core::model::{Issue, StatusCategory};
 use jdesk_core::queue::State;
@@ -168,6 +168,12 @@ fn empty(c: &Colors, title: &str, hint: &str) -> AnyElement {
 }
 
 impl PaneBodies for Bodies {
+    /// The tray's "Add to page" picker: "iss" or "ji" then Tab switches it to issues (the
+    /// shell then asks for our issue picker with AddFileToPage).
+    fn tray_tab_mode(&self) -> cho_layout_ui::shell::TrayTabMode {
+        cho_layout_ui::shell::TrayTabMode::new("issues").with_alias("jira")
+    }
+
     fn body(
         &self,
         pane: PaneId,
@@ -182,7 +188,14 @@ impl PaneBodies for Bodies {
             PaneFocus::Preview => {
                 let key = self.model.read(cx).selected.clone();
                 match key {
-                    Some(k) => issue_detail(&self.model, &k, self.scroll(pane), window, cx),
+                    Some(k) => issue_detail(
+                        &self.model,
+                        &k,
+                        &pane_name(pane),
+                        self.scroll(pane),
+                        window,
+                        cx,
+                    ),
                     None => empty(
                         &self.model.read(cx).colors,
                         "No issue selected",
@@ -190,7 +203,14 @@ impl PaneBodies for Bodies {
                     ),
                 }
             }
-            PaneFocus::Issue(k) => issue_detail(&self.model, &k, self.scroll(pane), window, cx),
+            PaneFocus::Issue(k) => issue_detail(
+                &self.model,
+                &k,
+                &pane_name(pane),
+                self.scroll(pane),
+                window,
+                cx,
+            ),
             PaneFocus::Notes => notes(&self.model, self.scroll(pane), cx),
             PaneFocus::Changes => changes(&self.model, cx),
             PaneFocus::Board => board(&self.model, cx),
@@ -231,7 +251,11 @@ impl PaneBodies for Bodies {
                 .unwrap_or_else(|| "not in the local copy".into()),
             PaneFocus::Notes => match &m.note_edit {
                 Some((k, _)) => format!("{k} · editing"),
-                None => m.current_key().unwrap_or_default(),
+                None => m
+                    .notes_for
+                    .clone()
+                    .or_else(|| m.current_key())
+                    .unwrap_or_default(),
             },
             PaneFocus::Changes => {
                 let (n, held) = m.pending_and_held();
@@ -456,11 +480,19 @@ fn filters(model: &Entity<Model>, cx: &mut App) -> AnyElement {
                                 .child(s(n.to_string())),
                         )
                     })
-                    .on_click(move |_, window, cx| {
+                    // ⌘-click (Ctrl off macOS) adds a sprint to those shown, ⇧-click takes every
+                    // sprint from the last one clicked; a plain click shows only it.
+                    .on_click(move |e, window, cx| {
+                        let add = e.modifiers().secondary();
+                        let range = e.modifiers().shift;
                         model2.update(cx, |m, cx| {
                             m.filter_cursor = n;
                             if let FilterRow::More(_, which) = &row2 {
                                 m.pending_more = Some(*which);
+                            } else if range {
+                                m.range_filter_row(&row2);
+                            } else if add {
+                                m.add_filter_row(&row2);
                             } else {
                                 m.toggle_filter_row(&row2);
                             }
@@ -473,12 +505,15 @@ fn filters(model: &Entity<Model>, cx: &mut App) -> AnyElement {
         };
         list = list.child(el);
     }
-    div()
-        .id("filters")
+    let m = model.read(cx);
+    m.scroll_areas
+        .get("filters")
+        .vertical(
+            "filters",
+            m.stretch(),
+            div().text_size(px(12.5)).child(list),
+        )
         .size_full()
-        .overflow_y_scroll()
-        .text_size(px(12.5))
-        .child(list)
         .into_any_element()
 }
 
@@ -525,6 +560,56 @@ fn issue_list(model: &Entity<Model>, cx: &mut App) -> AnyElement {
                 .child(icon("arrow-up-down", 11., c.icon_muted))
                 .child(s(sort)),
         );
+    // Status chips: one per Jira status category, with how many each would show.
+    let chosen = m.filter.groups.clone();
+    let counts = m.facets.groups.clone();
+    let mut status_row = div()
+        .flex_none()
+        .px(px(10.))
+        .py(px(4.))
+        .flex()
+        .flex_wrap()
+        .items_center()
+        .gap(px(6.))
+        .border_b_1()
+        .border_color(c.border_variant);
+    for (gi, name) in m.chip_names().into_iter().enumerate() {
+        let on = chosen.contains(&name);
+        let (fg, bg) = status_colors(&c, m.chip_category(&name));
+        let n = counts.get(&name).copied().unwrap_or(0);
+        let model2 = model.clone();
+        status_row = status_row.child(
+            div()
+                .id(("status-chip", gi))
+                .flex_none()
+                .h(px(20.))
+                .px(px(7.))
+                .flex()
+                .items_center()
+                .gap(px(5.))
+                .rounded(px(10.))
+                .border_1()
+                .border_color(if on { fg } else { c.border_variant })
+                .bg(if on { bg } else { gpui::transparent_black() })
+                .text_size(px(11.))
+                .cursor_pointer()
+                .hover(|d| d.bg(c.hover))
+                .child(div().size(px(7.)).rounded_full().bg(fg))
+                .child(
+                    div()
+                        .text_color(if on { fg } else { c.text })
+                        .child(s(name.clone())),
+                )
+                .child(div().text_color(c.text_muted).child(s(n.to_string())))
+                .on_click(move |_, _, cx| {
+                    model2.update(cx, |m, cx| {
+                        m.toggle_group(&name);
+                        m.generation += 1;
+                        cx.notify();
+                    });
+                }),
+        );
+    }
     let chips = crate::omni::chips(m);
     let suggestions = search.as_ref().map(|o| crate::omni::suggestions(m, o));
     let search_bar = match &search {
@@ -567,15 +652,17 @@ fn issue_list(model: &Entity<Model>, cx: &mut App) -> AnyElement {
         }
     } else {
         let model2 = model.clone();
-        uniform_list("issue-list", count, move |range, _window, cx| {
+        let over = m.scroll_areas.get("issue-list").overscroll();
+        crate::scroll::uniform_list("issue-list", count, move |range, _window, cx| {
             let m = model2.read(cx);
             let focused = m.focus == PaneFocus::Issues;
             range
                 .map(|row| issue_row(&model2, m, row, focused))
                 .collect::<Vec<_>>()
         })
-        .track_scroll(scroll)
+        .wrap(&over, &scroll, m.stretch())
         .flex_1()
+        .min_h_0()
         .into_any_element()
     };
     div()
@@ -584,6 +671,7 @@ fn issue_list(model: &Entity<Model>, cx: &mut App) -> AnyElement {
         .flex_col()
         .text_size(px(12.5))
         .child(header)
+        .child(status_row)
         .children(search_bar)
         .child(body)
         .into_any_element()
@@ -645,7 +733,8 @@ fn issue_row(model: &Entity<Model>, m: &Model, row: usize, focused: bool) -> Any
                 .when(f.starred, |d| {
                     d.child(icon("star", 11., c.warning.unwrap_or(c.text_accent)))
                 })
-                .when(f.noted, |d| d.child(icon("sticky-note", 11., c.icon_muted))),
+                .when(f.noted, |d| d.child(icon("sticky-note", 11., c.icon_muted)))
+                .when(f.requests, |d| d.child(icon("flag", 11., c.text_accent))),
         )
         .child(
             div()
@@ -929,9 +1018,94 @@ fn section(c: &Colors, title: &str, extra: Option<String>) -> AnyElement {
         .into_any_element()
 }
 
+/// Press, drag and release over `content` select its text (pieces in `map`): a press on text
+/// starts a selection (a word on a double click, the piece on a triple, extending with Shift),
+/// a press elsewhere clears it, and a drag moves its end.
+fn selecting(
+    content: gpui::Div,
+    model: &Entity<Model>,
+    pane: &str,
+    map: &crate::select::TextMap,
+) -> gpui::Div {
+    use crate::select::TextSel;
+    use gpui::{MouseButton, MouseDownEvent, MouseMoveEvent};
+    let (m1, p1, map1) = (model.clone(), pane.to_string(), map.clone());
+    let (m2, p2, map2) = (model.clone(), pane.to_string(), map.clone());
+    let (m3, p3) = (model.clone(), pane.to_string());
+    content
+        .on_mouse_down(MouseButton::Left, move |ev: &MouseDownEvent, _, cx| {
+            let hit = map1.hit(ev.position, false);
+            m1.update(cx, |m, cx| {
+                let before = m.sel(&p1);
+                match hit {
+                    None => {
+                        m.text_sel.borrow_mut().remove(&p1);
+                    }
+                    Some(p) => {
+                        let mut sel = match (ev.modifiers.shift, before, ev.click_count) {
+                            (true, Some(b), _) => TextSel::new(b.anchor, p),
+                            (_, _, 2) => map1.word(p),
+                            (_, _, n) if n >= 3 => TextSel::new((p.0, 0), (p.0, map1.len_of(p.0))),
+                            _ => TextSel::new(p, p),
+                        };
+                        sel.dragging = ev.click_count <= 1;
+                        m.text_sel.borrow_mut().insert(p1.clone(), sel);
+                    }
+                }
+                m.generation += 1;
+                cx.notify();
+            });
+        })
+        .on_mouse_move(move |ev: &MouseMoveEvent, _, cx| {
+            if !m2.read(cx).sel(&p2).is_some_and(|s| s.dragging) {
+                return;
+            }
+            let held = ev.pressed_button == Some(MouseButton::Left);
+            let hit = if held {
+                map2.hit(ev.position, true)
+            } else {
+                None
+            };
+            m2.update(cx, |m, cx| {
+                let mut sels = m.text_sel.borrow_mut();
+                let Some(s) = sels.get_mut(&p2) else {
+                    return;
+                };
+                if !held {
+                    s.dragging = false;
+                } else if let Some(p) = hit
+                    && s.head != p
+                {
+                    s.head = p;
+                    drop(sels);
+                    m.generation += 1;
+                    cx.notify();
+                }
+            });
+        })
+        .on_mouse_up(MouseButton::Left, move |_, _, cx| {
+            m3.update(cx, |m, _| {
+                if let Some(s) = m.text_sel.borrow_mut().get_mut(&p3) {
+                    s.dragging = false;
+                }
+            });
+        })
+}
+
+/// A pane's name (see [`crate::select`]).
+pub fn pane_name(pane: PaneId) -> String {
+    format!("{pane:?}")
+}
+
+/// The name of the selectable text of `pane` while it shows `key`.
+pub fn text_area(pane: &str, key: &str) -> String {
+    format!("{pane}|{key}")
+}
+
 fn issue_detail(
     model: &Entity<Model>,
     key: &str,
+    pane: &str,
     scroll: ScrollHandle,
     _window: &mut Window,
     cx: &mut App,
@@ -949,6 +1123,26 @@ fn issue_detail(
     let differs = |f: &dyn Fn(&Issue) -> String| raw.is_some_and(|r| f(r) != f(i));
     let flags = m.flags_of(key);
     let open: Vec<_> = m.desk.queue.for_issue(key).cloned().collect();
+    // Its text can be selected: the pieces register afresh as they're drawn. A selection
+    // belongs to this pane showing this issue; another issue here starts without one.
+    let area = text_area(pane, key);
+    m.forget_text_except(pane, &area);
+    let text_map = m.text_map(&area);
+    text_map.clear();
+    let pane = area.as_str();
+    let media = i.media_attachments();
+    let rich = crate::rich::Rich::new(&c, model, m, &media, &format!("rt-{key}")).selectable(pane);
+    let plain = |c: &Colors, t: String| -> AnyElement {
+        if t.is_empty() {
+            plain(c, t)
+        } else {
+            div()
+                .min_w_0()
+                .truncate()
+                .child(rich.text(t))
+                .into_any_element()
+        }
+    };
 
     let top = div()
         .flex()
@@ -980,7 +1174,7 @@ fn issue_detail(
         .font_weight(FontWeight::SEMIBOLD)
         .line_height(px(24.))
         .text_color(c.text)
-        .child(s(i.summary.clone()));
+        .child(rich.text(i.summary.clone()));
 
     let banner = (!open.is_empty()).then(|| {
         let mut b = div()
@@ -1011,7 +1205,10 @@ fn issue_detail(
                             .font_weight(FontWeight::NORMAL)
                             .text_size(px(11.))
                             .text_color(c.text_muted)
-                            .child("u undoes the last · ⌘⇧A applies all"),
+                            .child(s(format!(
+                                "u undoes the last · {} applies all",
+                                state::apply_key()
+                            ))),
                     ),
             );
         for ch in &open {
@@ -1060,7 +1257,7 @@ fn issue_detail(
         .flex_wrap()
         .gap(px(4.))
         .children(i.labels.iter().map(|l| label_chip(&c, l)))
-        .when(i.labels.is_empty(), |d| d.child(plain(&c, "")))
+        .when(i.labels.is_empty(), |d| d.child(plain(&c, String::new())))
         .into_any_element();
 
     let fields = div()
@@ -1185,8 +1382,6 @@ fn issue_detail(
             false,
         ));
 
-    let media = i.media_attachments();
-    let rich = crate::rich::Rich::new(&c, model, m, &media, &format!("rt-{key}"));
     let mut col = div()
         .flex()
         .flex_col()
@@ -1200,7 +1395,7 @@ fn issue_detail(
         .child(fields)
         .child(section(&c, "Description", None))
         .child(if i.description.is_empty() {
-            plain(&c, "")
+            plain(&c, String::new())
         } else {
             rich.blocks(&i.description)
         });
@@ -1281,7 +1476,7 @@ fn issue_detail(
         }),
     ));
     if i.comments.is_empty() {
-        col = col.child(plain(&c, ""));
+        col = col.child(plain(&c, String::new()));
     }
     for cm in &i.comments {
         col = col.child(
@@ -1355,13 +1550,13 @@ fn issue_detail(
     });
     col = col.child(div().h(px(40.)));
 
-    div()
-        .id(s(format!("detail-{key}")))
+    let col = selecting(col, model, pane, &text_map);
+    m.scroll_areas
+        .get(format!("detail-{key}"))
+        .tracking(scroll.clone())
+        .vertical(s(format!("detail-{key}")), m.stretch(), div().child(col))
         .size_full()
         .bg(c.editor)
-        .overflow_y_scroll()
-        .track_scroll(&scroll)
-        .child(col)
         .into_any_element()
 }
 
@@ -1370,9 +1565,11 @@ fn issue_detail(
 fn notes(model: &Entity<Model>, scroll: ScrollHandle, cx: &mut App) -> AnyElement {
     let m = model.read(cx);
     let c = m.colors.clone();
+    // The issue it follows (`Model::follow_for_notes`): clicking in Notes, Filters or Settings
+    // doesn't move it to another.
     let (key, editing) = match &m.note_edit {
         Some((k, t)) => (Some(k.clone()), Some(t.clone())),
-        None => (m.current_key(), None),
+        None => (m.notes_for.clone().or_else(|| m.current_key()), None),
     };
     let Some(key) = key else {
         return empty(&c, "No issue selected", "Notes follow the issue you're on");
@@ -1457,14 +1654,330 @@ fn notes(model: &Entity<Model>, scroll: ScrollHandle, cx: &mut App) -> AnyElemen
         .flex_col()
         .child(head)
         .child(
-            div()
-                .id("notes-body")
+            m.scroll_areas
+                .get("notes-body")
+                .tracking(scroll.clone())
+                .vertical(
+                    "notes-body",
+                    m.stretch(),
+                    div().child(body).child(requests_section(model, &key, cx)),
+                )
                 .flex_1()
-                .overflow_y_scroll()
-                .track_scroll(&scroll)
-                .child(body),
+                .min_h_0(),
         )
         .into_any_element()
+}
+
+/// The issue's requests, under its note: what you asked for outside Jira Desk, where each
+/// stands, and buttons to hand one to an agent, confirm it, drop it or open it again.
+fn requests_section(model: &Entity<Model>, key: &str, cx: &App) -> AnyElement {
+    let m = model.read(cx);
+    let c = m.colors.clone();
+    let mut list: Vec<&jdesk_core::requests::Request> = m.desk.requests.for_issue(key).collect();
+    // Open ones first, newest first within each.
+    list.sort_by_key(|r| (!r.state.is_open(), std::cmp::Reverse(r.id)));
+    let mut col = div()
+        .flex()
+        .flex_col()
+        .gap(px(6.))
+        .px(px(10.))
+        .pt(px(6.))
+        .pb(px(12.))
+        .border_t_1()
+        .border_color(c.border_variant)
+        .child(
+            div()
+                .flex()
+                .items_center()
+                .gap(px(6.))
+                .child(icon("flag", 12., c.icon_muted))
+                .child(
+                    div()
+                        .text_size(px(11.))
+                        .font_weight(FontWeight::SEMIBOLD)
+                        .text_color(c.text_muted)
+                        .child("REQUESTS"),
+                )
+                .child(div().flex_1())
+                .child(
+                    div()
+                        .text_size(px(11.))
+                        .text_color(c.text_muted)
+                        .child("⇧R adds one"),
+                ),
+        );
+    if list.is_empty() {
+        col = col.child(div().text_size(px(12.)).text_color(c.text_muted).child(
+            "Nothing asked. A request is something to make true outside Jira Desk: a description rewrite, a link, a parent, a fix version.",
+        ));
+    }
+    for r in list.into_iter().take(12) {
+        let open = r.state.is_open();
+        let id = r.id;
+        let status = request_status(r);
+        let mut row = div()
+            .flex()
+            .flex_col()
+            .gap(px(3.))
+            .p(px(6.))
+            .rounded(px(5.))
+            .bg(c.editor)
+            .border_1()
+            .border_color(if r.changed && open {
+                c.text_accent
+            } else {
+                c.border_variant
+            })
+            .when(!open, |d| d.opacity(0.65))
+            .child(
+                div()
+                    .flex()
+                    .items_center()
+                    .gap(px(6.))
+                    .child(
+                        div()
+                            .font_family(c.mono_font.clone())
+                            .text_size(px(11.))
+                            .text_color(c.text_muted)
+                            .child(s(format!("#{id}"))),
+                    )
+                    .child({
+                        // Cut to one line here; a click opens the whole request.
+                        let model = model.clone();
+                        div()
+                            .id(s(format!("request-{id}-read")))
+                            .flex_1()
+                            .min_w_0()
+                            .truncate()
+                            .cursor_pointer()
+                            .hover(|d| d.text_color(c.text_accent))
+                            .child(s(r.want.describe()))
+                            .on_click(move |_, _, cx| {
+                                model.update(cx, |m, cx| {
+                                    m.pending_request = Some(id);
+                                    cx.notify();
+                                });
+                            })
+                    })
+                    .child(
+                        div()
+                            .flex_none()
+                            .text_size(px(11.))
+                            .text_color(if r.changed && open {
+                                c.text_accent
+                            } else {
+                                c.text_muted
+                            })
+                            .child(s(status)),
+                    )
+                    // Handed off by mistake (or the agent didn't take it): back to open.
+                    .when(
+                        matches!(r.state, jdesk_core::requests::State::HandedOff { .. }),
+                        |d| {
+                            let model = model.clone();
+                            d.child(
+                                div()
+                                    .id(s(format!("request-{id}-undo")))
+                                    .flex_none()
+                                    .px(px(4.))
+                                    .rounded(px(3.))
+                                    .text_size(px(12.))
+                                    .text_color(c.text_muted)
+                                    .cursor_pointer()
+                                    .hover(|d| d.bg(c.hover).text_color(c.text))
+                                    .child("↺")
+                                    .on_click(move |_, _, cx| request_act(&model, id, "open", cx)),
+                            )
+                        },
+                    ),
+            );
+        if let jdesk_core::requests::Want::Description { instructions: t }
+        | jdesk_core::requests::Want::Other { text: t } = &r.want
+            && t.lines().count() > 1
+        {
+            row = row.child(
+                div()
+                    .text_size(px(11.5))
+                    .text_color(c.text_muted)
+                    .child(s(t.clone())),
+            );
+        }
+        if !r.note.is_empty() {
+            row = row.child(
+                div()
+                    .text_size(px(11.5))
+                    .text_color(c.text_muted)
+                    .child(s(format!("“{}”", r.note))),
+            );
+        }
+        let buttons = request_buttons(model, r, &c, "request");
+        col = col.child(row.child(buttons));
+    }
+    col.into_any_element()
+}
+
+/// A request's buttons (in its row, and in its dialog: `prefix` keeps their ids apart).
+pub fn request_buttons(
+    model: &Entity<Model>,
+    r: &jdesk_core::requests::Request,
+    c: &Colors,
+    prefix: &str,
+) -> gpui::Div {
+    let open = r.state.is_open();
+    let id = r.id;
+    let button = |act: &'static str, label: &'static str, strong: bool| {
+        let model = model.clone();
+        div()
+            .id(s(format!("{prefix}-{id}-{act}")))
+            .px(px(6.))
+            .h(px(20.))
+            .flex()
+            .items_center()
+            .rounded(px(4.))
+            .border_1()
+            .border_color(if strong { c.text_accent } else { c.border })
+            .text_size(px(11.))
+            .text_color(if strong { c.text } else { c.text_muted })
+            .cursor_pointer()
+            .hover(|d| d.bg(c.hover))
+            .child(label)
+            .on_click(move |_, _, cx| request_act(&model, id, act, cx))
+    };
+    let mut buttons = div().flex().gap(px(6.)).pt(px(2.));
+    // A link or parent Jira Desk can make itself: one click queues it (⇧⌘A applies).
+    let queueable = matches!(
+        r.want,
+        jdesk_core::requests::Want::Link { .. } | jdesk_core::requests::Want::Parent { .. }
+    );
+    if open && queueable {
+        buttons = buttons.child(button("queue", "Queue it", true));
+    }
+    if open {
+        buttons = buttons
+            .child(button("copy", "Copy for agent", !r.changed && !queueable))
+            .child(button(
+                "done",
+                if r.changed { "Yes, done" } else { "Done" },
+                r.changed,
+            ))
+            .child(button("drop", "Drop", false));
+    } else {
+        buttons = buttons.child(button("open", "Reopen", false));
+    }
+    buttons
+}
+
+/// What a request stands at, in words.
+pub fn request_status(r: &jdesk_core::requests::Request) -> String {
+    if r.changed && r.state.is_open() {
+        return "changed in Jira: done?".to_string();
+    }
+    match &r.state {
+        jdesk_core::requests::State::HandedOff { to, .. } => format!("handed to {to}"),
+        jdesk_core::requests::State::Confirmed { by, .. } => format!("done ({by})"),
+        st => st.word().to_string(),
+    }
+}
+
+/// A request button (or the palette's Copy for agent): `copy` puts the agent text on the
+/// clipboard and hands an open request to the agent; `done`, `drop` and `open` move it on.
+pub fn request_act(model: &Entity<Model>, id: u64, act: &str, cx: &mut App) {
+    use jdesk_core::control::{Request, data};
+    if act == "copy" {
+        let text = model.update(cx, |m, _| {
+            let text = data(&mut m.desk, &Request::RequestPrompt { id })
+                .map(|r| r.message)
+                .map_err(|e| format!("{e:#}"));
+            if text.is_ok()
+                && m.desk
+                    .requests
+                    .get(id)
+                    .is_some_and(|r| r.state == jdesk_core::requests::State::Open)
+            {
+                let _ = data(
+                    &mut m.desk,
+                    &Request::RequestSet {
+                        id,
+                        state: "handed".into(),
+                        note: None,
+                        by: Some("agent".into()),
+                    },
+                );
+            }
+            text
+        });
+        match text {
+            Ok(t) => {
+                cx.write_to_clipboard(gpui::ClipboardItem::new_string(t));
+                model.update(cx, |m, cx| {
+                    m.rebuild();
+                    m.note(format!(
+                        "Copied request #{id} for an agent: paste it into one (it reports back with jdesk)"
+                    ));
+                    cx.notify();
+                });
+            }
+            Err(e) => model.update(cx, |m, cx| {
+                m.error(e);
+                cx.notify();
+            }),
+        }
+        return;
+    }
+    if act == "queue" {
+        model.update(cx, |m, cx| {
+            let Some(r) = m.desk.requests.get(id).cloned() else {
+                return;
+            };
+            let (field, value) = match &r.want {
+                jdesk_core::requests::Want::Link { relation, other } => {
+                    ("link", vec![relation.clone(), other.clone()])
+                }
+                jdesk_core::requests::Want::Parent { to } => ("parent", vec![to.clone()]),
+                _ => return,
+            };
+            match jdesk_core::control::parse_change(&m.desk, &r.key, field, &value) {
+                Ok(edit) => {
+                    m.queue(&r.key, edit);
+                    let _ = data(
+                        &mut m.desk,
+                        &Request::RequestSet {
+                            id,
+                            state: "handed".into(),
+                            note: Some(format!(
+                                "queued in Jira Desk: applies with {}",
+                                state::apply_key()
+                            )),
+                            by: Some("Jira Desk".into()),
+                        },
+                    );
+                    m.rebuild();
+                }
+                Err(e) => m.error(format!("{e:#}")),
+            }
+            cx.notify();
+        });
+        return;
+    }
+    model.update(cx, |m, cx| {
+        let r = data(
+            &mut m.desk,
+            &Request::RequestSet {
+                id,
+                state: act.into(),
+                note: None,
+                by: None,
+            },
+        );
+        match r {
+            Ok(resp) => {
+                m.rebuild();
+                m.note(resp.message);
+            }
+            Err(e) => m.error(format!("{e:#}")),
+        }
+        cx.notify();
+    });
 }
 
 // ----- Changes --------------------------------------------------------------------------------
@@ -1477,7 +1990,10 @@ fn changes(model: &Entity<Model>, cx: &mut App) -> AnyElement {
         return empty(
             &c,
             "No changes queued",
-            "Changes you make (t status, a assign, c comment…) wait here until you apply them with ⌘⇧A.",
+            &format!(
+                "Changes you make (t status, a assign, c comment…) wait here until you apply them with {}.",
+                state::apply_key()
+            ),
         );
     }
     let focused = m.focus == PaneFocus::Changes;
@@ -1518,7 +2034,10 @@ fn changes(model: &Entity<Model>, cx: &mut App) -> AnyElement {
             div()
                 .text_size(px(11.))
                 .text_color(c.text_muted)
-                .child("⌘⇧A apply all · Enter apply one · d discard · r retry · ⇧R overwrite"),
+                .child(s(format!(
+                    "{} apply all · Enter apply one · d discard · r retry · ⇧R overwrite",
+                    state::apply_key()
+                ))),
         );
     let mut list = div().flex().flex_col();
     let mut history_started = false;
@@ -1713,17 +2232,20 @@ fn changes(model: &Entity<Model>, cx: &mut App) -> AnyElement {
         .text_size(px(12.5))
         .child(head)
         .child(
-            div()
-                .id("changes-list")
+            m.scroll_areas
+                .get("changes-list")
+                .vertical("changes-list", m.stretch(), div().child(list))
                 .flex_1()
-                .overflow_y_scroll()
-                .child(list),
+                .min_h_0(),
         )
         .into_any_element()
 }
 
 // ----- Board ----------------------------------------------------------------------------------
 
+// Sideways scrolling (the columns, the people bar): scroll.rs stretches up and down only,
+// as Chorong's does, so these scroll as GPUI does.
+#[allow(clippy::disallowed_methods)]
 fn board(model: &Entity<Model>, cx: &mut App) -> AnyElement {
     let m = model.read(cx);
     let c = m.colors.clone();
@@ -1745,43 +2267,31 @@ fn board(model: &Entity<Model>, cx: &mut App) -> AnyElement {
         .w(px(n * state::BOARD_COL_W + (n + 1.) * state::BOARD_GAP));
     for (ci, (name, cat, cards)) in cols.iter().enumerate() {
         let (fg, _) = status_colors(&c, *cat);
-        let mut col = div()
-            .id(("board-col", ci))
-            .w(px(state::BOARD_COL_W))
-            .flex_none()
-            .h_full()
-            .flex()
-            .flex_col()
-            .gap(px(6.))
-            .p(px(6.))
-            .rounded(px(6.))
-            .bg(c.panel)
-            .overflow_y_scroll()
-            .child(
-                div()
-                    .flex()
-                    .items_center()
-                    .gap(px(6.))
-                    .pb(px(2.))
-                    .child(div().size(px(7.)).rounded(px(4.)).bg(fg))
-                    .child(
-                        div()
-                            .text_size(px(11.))
-                            .font_weight(FontWeight::SEMIBOLD)
-                            .text_color(c.text_muted)
-                            .child(s(name.to_uppercase())),
-                    )
-                    .child(div().text_size(px(11.)).text_color(c.text_muted).child(s({
-                        let pts: f64 = cards
-                            .iter()
-                            .filter_map(|i| m.effective[*i].story_points)
-                            .sum();
-                        match state::points_total(pts) {
-                            p if p.is_empty() => cards.len().to_string(),
-                            p => format!("{} · {p}", cards.len()),
-                        }
-                    }))),
-            );
+        let mut col = div().flex().flex_col().gap(px(6.)).p(px(6.)).child(
+            div()
+                .flex()
+                .items_center()
+                .gap(px(6.))
+                .pb(px(2.))
+                .child(div().size(px(7.)).rounded(px(4.)).bg(fg))
+                .child(
+                    div()
+                        .text_size(px(11.))
+                        .font_weight(FontWeight::SEMIBOLD)
+                        .text_color(c.text_muted)
+                        .child(s(name.to_uppercase())),
+                )
+                .child(div().text_size(px(11.)).text_color(c.text_muted).child(s({
+                    let pts: f64 = cards
+                        .iter()
+                        .filter_map(|i| m.effective[*i].story_points)
+                        .sum();
+                    match state::points_total(pts) {
+                        p if p.is_empty() => cards.len().to_string(),
+                        p => format!("{} · {p}", cards.len()),
+                    }
+                }))),
+        );
         let cr = cr.min(cards.len().saturating_sub(1));
         for (ri, idx) in cards.iter().enumerate() {
             let i = &m.effective[*idx];
@@ -1824,6 +2334,7 @@ fn board(model: &Entity<Model>, cx: &mut App) -> AnyElement {
                             .when(f.starred, |d| {
                                 d.child(icon("star", 11., c.warning.unwrap_or(c.text_accent)))
                             })
+                            .when(f.requests, |d| d.child(icon("flag", 11., c.text_accent)))
                             .child(div().flex_1())
                             .child(
                                 div()
@@ -1849,7 +2360,16 @@ fn board(model: &Entity<Model>, cx: &mut App) -> AnyElement {
                     }),
             );
         }
-        row = row.child(col);
+        row = row.child(
+            m.scroll_areas
+                .get(format!("board-col-{ci}"))
+                .vertical(("board-col", ci), m.stretch(), col)
+                .w(px(state::BOARD_COL_W))
+                .flex_none()
+                .h_full()
+                .rounded(px(6.))
+                .bg(c.panel),
+        );
     }
     div()
         .size_full()
@@ -1871,6 +2391,9 @@ fn board(model: &Entity<Model>, cx: &mut App) -> AnyElement {
 
 /// The people on the board, with how many cards each has: a click shows only theirs (again
 /// to show everyone's), the same assignee filter as `f a` and the Filters pane.
+// Sideways scrolling (the columns, the people bar): scroll.rs stretches up and down only,
+// as Chorong's does, so these scroll as GPUI does.
+#[allow(clippy::disallowed_methods)]
 fn board_people(model: &Entity<Model>, cx: &App) -> AnyElement {
     let m = model.read(cx);
     let c = m.colors.clone();
@@ -2023,6 +2546,45 @@ fn settings(model: &Entity<Model>, scroll: ScrollHandle, cx: &mut App) -> AnyEle
         .px(px(12.))
         .pb(px(24.))
         .text_size(px(12.5));
+
+    // Behaviour: choices saved in prefs.json.
+    let on = m.auto_advance;
+    col = col.child(heading("Behaviour")).child(
+        div()
+            .id("setting-auto-advance")
+            .flex()
+            .items_center()
+            .gap(px(10.))
+            .py(px(4.))
+            .rounded(px(4.))
+            .cursor_pointer()
+            .hover(|d| d.bg(c.hover))
+            // The switch.
+            .child(
+                div()
+                    .w(px(26.))
+                    .h(px(15.))
+                    .flex_none()
+                    .rounded(px(8.))
+                    .p(px(2.))
+                    .flex()
+                    .when(on, |d| d.justify_end())
+                    .bg(if on { c.text_accent } else { c.border })
+                    .child(div().size(px(11.)).rounded(px(6.)).bg(c.panel)),
+            )
+            .child(
+                div()
+                    .flex()
+                    .flex_col()
+                    .child(div().text_color(c.text).child("Auto-advance"))
+                    .child(div().text_size(px(11.)).text_color(c.text_muted).child(
+                        "After a change, star or tag made from the List, select the next issue (a toggles)",
+                    )),
+            )
+            .on_click(move |_, window, cx| {
+                window.dispatch_action(Box::new(crate::actions::ToggleAutoAdvance), cx);
+            }),
+    );
 
     // Storage.
     col = col.child(
@@ -2292,12 +2854,11 @@ fn settings(model: &Entity<Model>, scroll: ScrollHandle, cx: &mut App) -> AnyEle
                     "These come from config.toml in the data folder; edit it there and restart.",
                 ),
         );
-    div()
-        .id("settings")
+    m.scroll_areas
+        .get("settings")
+        .tracking(scroll.clone())
+        .vertical("settings", m.stretch(), div().child(col))
         .size_full()
-        .overflow_y_scroll()
-        .track_scroll(&scroll)
-        .child(col)
         .into_any_element()
 }
 
@@ -2362,7 +2923,15 @@ fn search_bar(
         );
     }
     let placeholder = match o.open {
-        Some(f) => format!("Type to find a {}…", f.name()),
+        Some(f) => format!(
+            "Type to find {} {}…",
+            if f.name().starts_with(['a', 'e', 'i', 'o', 'u']) {
+                "an"
+            } else {
+                "a"
+            },
+            f.name()
+        ),
         None if chips.is_empty() => {
             "Search, or type tag, assignee, status… then Tab (# for your tags)".into()
         }

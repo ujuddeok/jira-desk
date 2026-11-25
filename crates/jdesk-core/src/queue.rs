@@ -46,6 +46,22 @@ pub enum Edit {
     Comment {
         text: String,
     },
+    /// A link to `other`, read from this issue's side (`relation`: "blocks", "is blocked by").
+    /// `outward`: this issue is the link's inward issue (it reads the type's outward phrase).
+    Link {
+        name: String,
+        relation: String,
+        outward: bool,
+        other: String,
+        #[serde(default)]
+        other_summary: String,
+    },
+    /// The issue's parent (its epic, for most issues).
+    Parent {
+        to: String,
+        #[serde(default)]
+        summary: String,
+    },
 }
 
 impl Edit {
@@ -60,7 +76,14 @@ impl Edit {
             Edit::Labels { .. } => "labels",
             Edit::Sprint { .. } => "sprint",
             Edit::Comment { .. } => "comment",
+            Edit::Link { .. } => "link",
+            Edit::Parent { .. } => "parent",
         }
+    }
+
+    /// Changes that add something (a comment, a link) never replace one another.
+    fn stacks(&self) -> bool {
+        matches!(self, Edit::Comment { .. } | Edit::Link { .. })
     }
 
     /// Whether the change can conflict with someone else's edit.
@@ -77,6 +100,8 @@ impl Edit {
             Edit::Points { to } => points(*to),
             Edit::Priority { to } => to.clone(),
             Edit::Sprint { to } => to.id.to_string(),
+            Edit::Link { .. } => "linked".into(),
+            Edit::Parent { to, .. } => to.to_uppercase(),
             Edit::Labels { .. } | Edit::Comment { .. } => String::new(),
         }
     }
@@ -97,6 +122,11 @@ impl Edit {
                 format!("Labels {}", parts.join(" "))
             }
             Edit::Sprint { to } => format!("Sprint → {}", to.name),
+            Edit::Link {
+                relation, other, ..
+            } => format!("Link → {relation} {other}"),
+            Edit::Parent { to, summary } if summary.is_empty() => format!("Parent → {to}"),
+            Edit::Parent { to, summary } => format!("Parent → {to} {summary}"),
             Edit::Comment { text } => {
                 let first = text.lines().next().unwrap_or_default();
                 let more = if text.lines().count() > 1 || first.chars().count() > 60 {
@@ -138,6 +168,23 @@ pub fn current(issue: &Issue, edit: &Edit) -> String {
             .filter(|s| s.state != crate::model::SprintState::Closed)
             .map(|s| s.id.to_string())
             .unwrap_or_default(),
+        // Already linked that way: nothing to send.
+        Edit::Link {
+            relation, other, ..
+        } => {
+            if issue.links.iter().any(|l| {
+                l.key.eq_ignore_ascii_case(other) && l.relation.eq_ignore_ascii_case(relation)
+            }) {
+                "linked".into()
+            } else {
+                String::new()
+            }
+        }
+        Edit::Parent { .. } => issue
+            .parent
+            .as_ref()
+            .map(|p| p.key.to_uppercase())
+            .unwrap_or_default(),
         Edit::Labels { .. } | Edit::Comment { .. } => String::new(),
     }
 }
@@ -153,6 +200,10 @@ fn shown(issue: &Issue, edit: &Edit) -> String {
         Edit::Sprint { .. } => issue
             .current_sprint()
             .map_or("no sprint".into(), |s| s.name.clone()),
+        Edit::Parent { .. } => issue
+            .parent
+            .as_ref()
+            .map_or("no parent".into(), |p| format!("{} {}", p.key, p.summary)),
         _ => match current(issue, edit) {
             s if s.is_empty() => "(empty)".into(),
             s => s,
@@ -221,6 +272,9 @@ pub struct ApplyReport {
     pub conflicts: usize,
     /// Issues read back from Jira after their changes, for the cache.
     pub refreshed: Vec<Issue>,
+    /// The other ends of links just made, read back for the cache only (their own changes,
+    /// if any, weren't checked here, so their fingerprints stay as they were).
+    pub also_read: Vec<Issue>,
     /// Issues whose changes were held: under review, or found changed materially just now.
     pub held: Vec<String>,
     /// Issues found changed materially on the fresh copy (a review should open for each).
@@ -301,7 +355,7 @@ impl Queue {
             c.key == issue.key
                 && c.edit.slot() == edit.slot()
                 && c.state == State::Pending
-                && !matches!(c.edit, Edit::Comment { .. })
+                && !c.edit.stacks()
         });
         let edit = match (edit, waiting) {
             (Edit::Labels { add, remove }, w) => {
@@ -330,6 +384,14 @@ impl Queue {
         let noop = match &edit {
             Edit::Labels { add, remove } => add.is_empty() && remove.is_empty(),
             Edit::Comment { .. } => false,
+            // The same link queued twice, or one Jira already has, adds nothing.
+            Edit::Link { .. } => {
+                current(issue, &edit) == edit.target()
+                    || self
+                        .changes
+                        .iter()
+                        .any(|c| c.key == issue.key && c.state == State::Pending && c.edit == edit)
+            }
             e => {
                 let base = waiting
                     .and_then(|i| self.changes[i].base.clone())
@@ -460,6 +522,24 @@ impl Queue {
                     out.sprints.push(to.clone());
                 }
                 Edit::Comment { .. } => {}
+                Edit::Link {
+                    relation,
+                    other,
+                    other_summary,
+                    ..
+                } => out.links.push(crate::model::Link {
+                    relation: relation.clone(),
+                    key: other.clone(),
+                    summary: other_summary.clone(),
+                    status: "queued".into(),
+                }),
+                Edit::Parent { to, summary } => {
+                    out.parent = Some(crate::model::ParentRef {
+                        key: to.clone(),
+                        summary: summary.clone(),
+                        kind: "Epic".into(),
+                    })
+                }
             }
         }
         out
@@ -578,6 +658,25 @@ impl Queue {
             {
                 report.refreshed.push(i);
             }
+            // A link shows on both issues: read the other ends back too.
+            let others: Vec<String> = self
+                .changes
+                .iter()
+                .filter(|c| c.key == key && matches!(c.state, State::Applied { at } if at == now))
+                .filter_map(|c| match &c.edit {
+                    Edit::Link { other, .. } => Some(other.clone()),
+                    _ => None,
+                })
+                .collect();
+            for other in others {
+                if !report.refreshed.iter().any(|i| i.key == other)
+                    && !report.also_read.iter().any(|i| i.key == other)
+                    && let Ok(v) = jira.issue(&other, &fields)
+                    && let Some(i) = parse::issue(&v, map)
+                {
+                    report.also_read.push(i);
+                }
+            }
         }
         // Keep only the newest applied changes as history.
         let applied = self.changes.iter().filter(|c| !c.is_open()).count();
@@ -689,6 +788,20 @@ fn send(
         }
         Edit::Sprint { to } => jira.move_to_sprint(to.id, key),
         Edit::Comment { text } => jira.comment(key, text),
+        Edit::Link {
+            name,
+            outward,
+            other,
+            ..
+        } => {
+            // "A blocks B": A is the inward issue. From B's side ("is blocked by"), the other way.
+            if *outward {
+                jira.link(name, key, other)
+            } else {
+                jira.link(name, other, key)
+            }
+        }
+        Edit::Parent { to, .. } => jira.set_parent(key, to, map.epic_link.as_deref()),
     }
 }
 
@@ -828,5 +941,81 @@ mod tests {
             .unwrap();
         assert_eq!(r.applied, 1);
         assert_eq!(r.refreshed[0].summary, "Mine");
+    }
+
+    #[test]
+    fn links_and_parents_are_sent_and_read_back_the_right_way_round() {
+        let (jira, map, issues) = setup();
+        let plain: Vec<&Issue> = issues
+            .iter()
+            .filter(|i| i.kind != "Epic" && i.links.is_empty())
+            .collect();
+        let (a, b) = (plain[0], plain[1]);
+        let epic = issues
+            .iter()
+            .find(|i| i.kind == "Epic" && a.parent.as_ref().is_none_or(|p| p.key != i.key))
+            .unwrap();
+        let mut q = Queue::default();
+        // "a is blocked by b": from a's side the inward phrase, so b is the inward issue.
+        let link = Edit::Link {
+            name: "Blocks".into(),
+            relation: "is blocked by".into(),
+            outward: false,
+            other: b.key.clone(),
+            other_summary: b.summary.clone(),
+        };
+        assert!(q.add(a, link.clone(), 1).unwrap());
+        assert!(
+            !q.add(a, link, 1).unwrap(),
+            "the same link twice adds nothing"
+        );
+        q.add(
+            a,
+            Edit::Parent {
+                to: epic.key.clone(),
+                summary: epic.summary.clone(),
+            },
+            1,
+        )
+        .unwrap();
+        // Queued values show before they're applied.
+        let shown = q.effective(a);
+        assert!(
+            shown
+                .links
+                .iter()
+                .any(|l| l.key == b.key && l.relation == "is blocked by")
+        );
+        assert_eq!(shown.parent.as_ref().unwrap().key, epic.key);
+
+        let r = q
+            .apply(&jira, &map, None, 3_000, &Default::default(), &|_| {})
+            .unwrap();
+        assert_eq!((r.applied, r.failed), (2, 0), "{:#?}", q.changes());
+        let a2 = r.refreshed.iter().find(|i| i.key == a.key).unwrap();
+        assert!(
+            a2.links
+                .iter()
+                .any(|l| l.key == b.key && l.relation == "is blocked by"),
+            "{:?}",
+            a2.links
+        );
+        assert_eq!(a2.parent.as_ref().unwrap().key, epic.key);
+        // The apply read b back too, for the cache.
+        let b_read = r.also_read.iter().find(|i| i.key == b.key).unwrap();
+        assert!(
+            b_read
+                .links
+                .iter()
+                .any(|l| l.key == a.key && l.relation == "blocks")
+        );
+        // And from b's side, the other way round.
+        let raw = jira.issue(&b.key, &map.search_fields()).unwrap();
+        let b2 = parse::issue(&raw, &map).unwrap();
+        assert!(
+            b2.links
+                .iter()
+                .any(|l| l.key == a.key && l.relation == "blocks")
+        );
     }
 }

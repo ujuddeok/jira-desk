@@ -37,6 +37,22 @@ pub trait Jira: Send + Sync {
     fn assign(&self, key: &str, account: Option<&str>) -> Result<()>;
     fn comment(&self, key: &str, text: &str) -> Result<()>;
     fn move_to_sprint(&self, sprint: u64, key: &str) -> Result<()>;
+    /// The kinds of link this site has (`issueLinkType`).
+    fn link_types(&self) -> Result<Vec<crate::model::LinkType>> {
+        Ok(crate::model::LinkType::standard())
+    }
+    /// A link of type `name` with `inward` as its inward issue and `outward` as its outward one:
+    /// for Blocks, "`inward` blocks `outward`".
+    fn link(&self, name: &str, inward: &str, outward: &str) -> Result<()> {
+        let _ = (name, inward, outward);
+        anyhow::bail!("this Jira can't make links")
+    }
+    /// Puts `key` under `parent` (its epic, for most issues): the `parent` field, or on Jira
+    /// Server and Data Center the Epic Link field when there is one.
+    fn set_parent(&self, key: &str, parent: &str, epic_link: Option<&str>) -> Result<()> {
+        let _ = epic_link;
+        self.edit(key, &json!({"fields": {"parent": {"key": parent}}}))
+    }
     /// People who can be assigned issues in `project`.
     fn assignable(&self, project: &str) -> Result<Vec<Person>>;
     fn browse_url(&self, key: &str) -> String;
@@ -328,6 +344,49 @@ impl Jira for HttpJira {
             Some(&json!({"issues": [key]})),
         )
         .map(|_| ())
+    }
+
+    fn link_types(&self) -> Result<Vec<crate::model::LinkType>> {
+        let v = self
+            .call("GET", "/rest/api/{v}/issueLinkType", None)?
+            .unwrap_or_default();
+        let types: Vec<crate::model::LinkType> = v["issueLinkTypes"]
+            .as_array()
+            .into_iter()
+            .flatten()
+            .filter_map(|t| {
+                Some(crate::model::LinkType {
+                    name: t["name"].as_str()?.to_string(),
+                    inward: t["inward"].as_str()?.to_string(),
+                    outward: t["outward"].as_str()?.to_string(),
+                })
+            })
+            .collect();
+        if types.is_empty() {
+            anyhow::bail!("Jira listed no link types");
+        }
+        Ok(types)
+    }
+
+    fn link(&self, name: &str, inward: &str, outward: &str) -> Result<()> {
+        self.call(
+            "POST",
+            "/rest/api/{v}/issueLink",
+            Some(&json!({
+                "type": {"name": name},
+                "inwardIssue": {"key": inward},
+                "outwardIssue": {"key": outward},
+            })),
+        )
+        .map(|_| ())
+    }
+
+    fn set_parent(&self, key: &str, parent: &str, epic_link: Option<&str>) -> Result<()> {
+        let body = match (&self.api, epic_link) {
+            (Api::Server, Some(f)) => json!({"fields": {f: parent}}),
+            _ => json!({"fields": {"parent": {"key": parent}}}),
+        };
+        self.edit(key, &body)
     }
 
     fn assignable(&self, project: &str) -> Result<Vec<Person>> {

@@ -12,9 +12,12 @@ mod double_tap;
 mod input;
 mod keymap;
 mod omni;
+mod overscroll;
 mod panes;
 mod picker;
 mod rich;
+mod scroll;
+mod select;
 mod state;
 mod view;
 
@@ -191,6 +194,9 @@ fn main() -> Result<()> {
                     if let Some(p) = keymap_problem.or(control_problem) {
                         m.error(p);
                     }
+                    if let Some(p) = m.desk.status_groups_problem.clone() {
+                        m.error(p);
+                    }
                     if m.refresh_due() {
                         m.start_sync(jdesk_core::sync::Mode::Auto, cx);
                     }
@@ -211,6 +217,10 @@ fn main() -> Result<()> {
                 let shell =
                     cx.new(|cx| Shell::new(ws, &theme, options, bodies.clone(), focus.clone(), cx));
                 window.focus(&focus);
+                // Hints written into the panes name the apply key as the keymap has it here.
+                if let Some(k) = cho_layout_ui::keys::label(&actions::ApplyAll, window) {
+                    state::set_apply_key(k);
+                }
                 let view = cx.new(|cx| view::DeskView::new(model, shell, bodies, focus, cx));
                 view.update(cx, |v, cx| {
                     v.start_control(jobs_rx, window, cx);

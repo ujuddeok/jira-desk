@@ -24,6 +24,7 @@ pub mod mcp;
 pub mod model;
 pub mod parse;
 pub mod queue;
+pub mod requests;
 pub mod sidecar;
 pub mod storage;
 pub mod store;
@@ -103,6 +104,11 @@ pub enum Source {
 pub struct Desk {
     pub dir: PathBuf,
     pub source: Source,
+    /// The List's status chips (`[[status_group]]` in config.toml), and a problem with them.
+    pub status_groups: Vec<config::StatusGroup>,
+    pub status_groups_problem: Option<String>,
+    /// Move to the next issue after a change made from the List (`auto_advance`).
+    pub auto_advance: bool,
     issues: Vec<Issue>,
     index: HashMap<String, usize>,
     pub queue: queue::Queue,
@@ -114,6 +120,14 @@ pub struct Desk {
     pub people: Vec<Person>,
     /// Fingerprints of issues you attached things to, and reviews of ones that changed a lot.
     pub identities: identity::Identities,
+    /// What you want made true of issues outside Jira Desk (`requests.json`).
+    pub requests: requests::Requests,
+    /// The site's kinds of link ("blocks", "relates to"…): from the last full sync, or Jira's
+    /// standard four until then.
+    pub link_types: Vec<model::LinkType>,
+    /// What the last sync found about requests (seen in Jira, or changed): for the status bar,
+    /// taken by whoever shows it.
+    pub request_news: Vec<String>,
 }
 
 /// What a background sync hands back to the [`Desk`].
@@ -122,6 +136,8 @@ pub struct SyncOutcome {
     pub myself: Option<Person>,
     pub field_map: Option<FieldMap>,
     pub people: Vec<Person>,
+    /// The site's kinds of link (full syncs only; empty otherwise).
+    pub link_types: Vec<model::LinkType>,
 }
 
 impl Desk {
@@ -139,7 +155,10 @@ impl Desk {
             );
         }
         let cfg = Config::load(&config_path)?;
-        Self::open_with(dir, Source::Jira(cfg))
+        let mut desk = Self::open_with(dir, Source::Jira(cfg))?;
+        (desk.status_groups, desk.status_groups_problem) = config::status_groups(dir);
+        desk.auto_advance = config::auto_advance(dir);
+        Ok(desk)
     }
 
     /// Demo mode: made-up issues in `dir/demo`, with a fake Jira that accepts changes.
@@ -153,7 +172,12 @@ impl Desk {
         let _ = std::fs::remove_file(dir.join("queue.json"));
         // Its journal too: a demo's record would only describe earlier, discarded demos.
         let _ = std::fs::remove_dir_all(dir.join("journal"));
-        Self::open_with(&dir, Source::Demo(Arc::new(demo::DemoJira::live(issues))))
+        let mut desk = Self::open_with(&dir, Source::Demo(Arc::new(demo::DemoJira::live(issues))))?;
+        // The demo reads its chips from the data folder's config.toml too, to try them out.
+        (desk.status_groups, desk.status_groups_problem) =
+            config::status_groups(dir.parent().unwrap_or(&dir));
+        desk.auto_advance = config::auto_advance(dir.parent().unwrap_or(&dir));
+        Ok(desk)
     }
 
     pub fn open_with(dir: &Path, source: Source) -> Result<Self> {
@@ -163,6 +187,9 @@ impl Desk {
         let mut desk = Self {
             dir: dir.to_path_buf(),
             source,
+            status_groups: config::default_status_groups(),
+            status_groups_problem: None,
+            auto_advance: false,
             issues: Vec::new(),
             index: HashMap::new(),
             queue: queue::Queue::open(&dir.join("queue.json"))?,
@@ -171,7 +198,13 @@ impl Desk {
             field_map: store.meta("field_map")?.unwrap_or_default(),
             last_sync: store.meta("last_sync")?,
             people: store.meta("people")?.unwrap_or_default(),
+            link_types: store
+                .meta::<Vec<model::LinkType>>("link_types")?
+                .filter(|t| !t.is_empty())
+                .unwrap_or_else(model::LinkType::standard),
             identities: identity::Identities::open(dir)?,
+            requests: requests::Requests::open(dir)?,
+            request_news: Vec::new(),
         };
         desk.set_issues(store.load_all()?);
         // Fingerprint anything you already attached things to (folders from before reviews).
@@ -221,6 +254,14 @@ impl Desk {
                 .unwrap_or(500),
         };
         (mb > 0).then(|| mb * 1024 * 1024)
+    }
+
+    /// Whether scrolling stretches at its ends (`overscroll`; always in the demo).
+    pub fn overscroll(&self) -> bool {
+        match &self.source {
+            Source::Jira(c) => c.overscroll,
+            Source::Demo(_) => true,
+        }
     }
 
     pub fn site(&self) -> String {
@@ -273,6 +314,9 @@ impl Desk {
         if !out.people.is_empty() {
             self.people = out.people;
         }
+        if !out.link_types.is_empty() {
+            self.link_types = out.link_types;
+        }
         self.last_sync = Some(out.report.at);
         if !out.report.upserted.is_empty() || !out.report.removed.is_empty() || out.report.full {
             // Keys only, for the record; failing to note a sync loses nothing of yours.
@@ -287,7 +331,30 @@ impl Desk {
             let _ = self.identities.check(i, now());
         }
         self.upsert(out.report.upserted, &out.report.removed);
+        // Open requests the issues now satisfy close; ones whose field changed ask you.
+        let issues = &self.issues;
+        let index = &self.index;
+        match self
+            .requests
+            .verify(|k| index.get(k).map(|i| &issues[*i]), now())
+        {
+            Ok(news) => self.request_news.extend(news),
+            Err(e) => self
+                .request_news
+                .push(format!("requests not checked: {e:#}")),
+        }
         self.demo_repurpose();
+    }
+
+    /// A new request on `key`, from what it is now. Returns its id.
+    pub fn add_request(&mut self, key: &str, want: requests::Want) -> Result<u64> {
+        let issue = self
+            .issue(key)
+            .cloned()
+            .with_context(|| format!("{key} is not in the local copy"))?;
+        let id = self.requests.add(&issue, want, now())?;
+        self.remember(key)?;
+        Ok(id)
     }
 
     /// Demo mode, for trying the review workflow: `JDESK_DEMO_REPURPOSE=DEMO-114` rewrites that
@@ -307,6 +374,7 @@ impl Desk {
             || !l.tags.is_empty()
             || self.sidecar.has_note(key)
             || self.queue.for_issue(key).next().is_some()
+            || self.requests.open_for(key) > 0
     }
 
     /// Keeps a fingerprint of `key` as it is now (when you first attach something to it).
@@ -417,6 +485,8 @@ impl Desk {
         for c in &changes {
             self.queue.discard(c.id)?;
         }
+        // Open requests were about the old issue: dropped (kept in the file and journal).
+        self.requests.drop_open(key, t)?;
         let rel = folder
             .strip_prefix(&self.dir)
             .unwrap_or(&folder)
@@ -473,10 +543,34 @@ impl Desk {
 
     /// Every issue as the app shows it: with your queued changes applied.
     pub fn effective_issues(&self) -> Vec<Issue> {
+        let categories: HashMap<String, model::StatusCategory> =
+            self.statuses().into_iter().collect();
         self.issues
             .iter()
-            .map(|i| self.queue.effective(i))
+            .map(|i| self.effective_with(i, &categories))
             .collect()
+    }
+
+    /// `raw` with your queued changes on it. A queued status brings its category too (from
+    /// the statuses Jira uses), so a change to Done counts as done for chips and Hide done.
+    pub fn effective(&self, raw: &Issue) -> Issue {
+        let categories: HashMap<String, model::StatusCategory> =
+            self.statuses().into_iter().collect();
+        self.effective_with(raw, &categories)
+    }
+
+    fn effective_with(
+        &self,
+        raw: &Issue,
+        categories: &HashMap<String, model::StatusCategory>,
+    ) -> Issue {
+        let mut e = self.queue.effective(raw);
+        if e.status != raw.status
+            && let Some(c) = categories.get(&e.status)
+        {
+            e.status_category = *c;
+        }
+        e
     }
 
     pub fn flags(&self, key: &str) -> filter::Flags {
@@ -486,6 +580,7 @@ impl Desk {
             pending: self.queue.for_issue(key).next().is_some(),
             tags: self.sidecar.local(key).tags,
             review: false,
+            requests: self.requests.open_for(key) > 0,
         }
     }
 
@@ -589,7 +684,7 @@ pub struct Recovery {
     pub backup: Option<PathBuf>,
 }
 
-/// Rebuilds the queue, notes and stars from the journal and compares them with the files in
+/// Rebuilds the queue, notes, stars and requests from the journal and compares them with the files in
 /// `dir`. With `write`, copies the current files to `recovery-<time>/` and puts back what the
 /// journal says. Changes found only in `queue.json` (not in the journal) are kept.
 pub fn recover(dir: &Path, write: bool) -> Result<Recovery> {
@@ -680,10 +775,50 @@ pub fn recover(dir: &Path, write: bool) -> Result<Recovery> {
         ));
     }
 
+    // Requests: the journal records each one whole after every change.
+    let requests_path = dir.join("requests.json");
+    let current_requests = match requests::Requests::open(dir) {
+        Ok(r) => r.all().to_vec(),
+        Err(e) => {
+            rec.differences
+                .push(format!("requests.json: unreadable ({e:#})"));
+            Vec::new()
+        }
+    };
+    let mut requests_out: Vec<requests::Request> = rebuilt.requests.values().cloned().collect();
+    for c in &current_requests {
+        match rebuilt.requests.get(&c.id) {
+            None => {
+                rec.differences.push(format!(
+                    "request: {} is in requests.json but not the journal (kept)",
+                    c.describe()
+                ));
+                requests_out.push(c.clone());
+            }
+            Some(r) if r != c => rec.differences.push(format!(
+                "request: {} differs: journal has it {}, requests.json {}",
+                c.describe(),
+                r.state.word(),
+                c.state.word()
+            )),
+            Some(_) => {}
+        }
+    }
+    for r in rebuilt.requests.values() {
+        if !current_requests.iter().any(|c| c.id == r.id) {
+            rec.differences.push(format!(
+                "request: {} ({}) is missing from requests.json",
+                r.describe(),
+                r.state.word()
+            ));
+        }
+    }
+    requests_out.sort_by_key(|r| r.id);
+
     if write && !rec.differences.is_empty() {
         let backup = dir.join(format!("recovery-{}", now()));
         std::fs::create_dir_all(backup.join("notes"))?;
-        for name in ["queue.json", "local.json"] {
+        for name in ["queue.json", "local.json", "requests.json"] {
             if dir.join(name).exists() {
                 std::fs::copy(dir.join(name), backup.join(name))?;
             }
@@ -696,6 +831,7 @@ pub fn recover(dir: &Path, write: bool) -> Result<Recovery> {
             }
         }
         queue::Queue::from_changes(&queue_path, merged).save()?;
+        requests::Requests::from_items(&requests_path, requests_out).save()?;
         for (k, t) in &notes {
             side.set_note(k, t)?;
         }
@@ -747,11 +883,20 @@ impl SyncJob {
                 store.set_meta("people", &people)?;
             }
         }
+        // The site's kinds of link, once per full sync (a failure keeps the ones known).
+        let mut link_types = Vec::new();
+        if report.full
+            && let Ok(t) = self.jira.link_types()
+        {
+            store.set_meta("link_types", &t)?;
+            link_types = t;
+        }
         Ok(SyncOutcome {
             report,
             myself: store.meta("myself")?,
             field_map: store.meta("field_map")?,
             people,
+            link_types,
         })
     }
 }

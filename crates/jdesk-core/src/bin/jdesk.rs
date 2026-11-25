@@ -14,16 +14,23 @@ const USAGE: &str = "\
 usage: jdesk [--data-dir DIR] [--demo] [--json] COMMAND
 
 Your data (works with or without the app; through the app while it's open):
-  list [--sprint active|backlog|all|NAME] [--assignee NAME|me|none] [--label L] [--tag T] [--text WORDS]
-  sprints [--assignee …] [--label …] [--tag …] [--text …]
-                                     story points per sprint and the backlog
+  list [--sprint active|backlog|all|NAME[,NAME…]] [--assignee NAME|me|none] [--label L] [--tag T] [--text WORDS]
+  sprints [--sprint NAME,NAME…] [--assignee …] [--label …] [--tag …] [--text …]
+                                     story points per sprint and the backlog; with several
+                                     sprints, those and their total together
   show KEY
   queue                              queued changes and recent history
   change KEY FIELD VALUE…            queue a change: status, assign, summary, points,
-                                     priority, labels (+add -remove), sprint, comment
+                                     priority, labels (+add -remove), sprint, comment,
+                                     link (blocks ABC-9), parent (an epic: ABC-5)
   star KEY [on|off]                  local only; no on/off toggles
   tag KEY TAG [on|off]               your own tags, local only
   note KEY [TEXT…]                   read, or replace (note KEY \"\" removes it)
+  requests [--all] [KEY]             what you asked for outside Jira Desk, and where it stands
+  request add KEY KIND VALUE…        KIND: description WORDS… | parent KEY | link RELATION… KEY
+                                     (link blocks ABC-9) | fix-version +NAME|-NAME | other WORDS…
+  request ID handed|done|open|drop [--note TEXT] [--by WHO]
+  request ID prompt                  the text to give an agent for it
   reviews                            issues that changed a lot in Jira
   resolve KEY keep|detach
   sync [--full]                      refresh from Jira
@@ -39,7 +46,7 @@ The app (needs it open):
 
 Files and agents:
   journal [--last N]                 the append-only record
-  recover [--write]                  rebuild the queue, notes and stars from the journal
+  recover [--write]                  rebuild the queue, notes, stars and requests from the journal
   where                              the data folder
   mcp                                serve the commands above as MCP tools on stdin/stdout
 ";
@@ -167,7 +174,9 @@ impl Ctx {
                 if !r.held.is_empty() {
                     msg.push_str("\n  see `jdesk reviews`; then `jdesk resolve KEY keep|detach`");
                 }
-                desk.store_refreshed(r.refreshed)?;
+                let mut read = r.refreshed;
+                read.extend(r.also_read);
+                desk.store_refreshed(read)?;
                 Ok(Response::ok(
                     msg,
                     serde_json::json!({ "applied": r.applied, "conflicts": r.conflicts, "failed": r.failed, "held": r.held }),
@@ -266,11 +275,13 @@ fn main() -> Result<()> {
             }
         }
         "sprints" => {
-            let (mut assignee, mut label, mut tag, mut text) = (None, None, None, None);
+            let (mut sprint, mut assignee, mut label, mut tag, mut text) =
+                (None, None, None, None, None);
             let mut i = 0;
             while i < args.len() {
                 let val = Some(arg(i + 1));
                 match args[i].as_str() {
+                    "--sprint" => sprint = val,
                     "--assignee" => assignee = val,
                     "--label" => label = val,
                     "--tag" => tag = val,
@@ -280,6 +291,7 @@ fn main() -> Result<()> {
                 i += 2;
             }
             Request::Sprints {
+                sprint,
                 assignee,
                 label,
                 tag,
@@ -301,6 +313,50 @@ fn main() -> Result<()> {
                 key: arg(0),
                 field: arg(1),
                 value: args[2..].to_vec(),
+            }
+        }
+        "requests" => {
+            let all = args.iter().any(|a| a == "--all");
+            let key = args.iter().find(|a| !a.starts_with("--")).cloned();
+            Request::Requests { key, all }
+        }
+        "request" => {
+            if arg(0) == "add" {
+                if args.len() < 4 {
+                    usage()
+                }
+                Request::RequestAdd {
+                    key: arg(1),
+                    kind: arg(2),
+                    value: args[3..].join(" "),
+                }
+            } else {
+                let Ok(id) = arg(0).trim_start_matches('#').parse::<u64>() else {
+                    usage()
+                };
+                match arg(1).as_str() {
+                    "prompt" => Request::RequestPrompt { id },
+                    "" => usage(),
+                    state => {
+                        let mut note = None;
+                        let mut by = None;
+                        let mut i = 2;
+                        while i < args.len() {
+                            match args[i].as_str() {
+                                "--note" => note = Some(arg(i + 1)),
+                                "--by" => by = Some(arg(i + 1)),
+                                _ => usage(),
+                            }
+                            i += 2;
+                        }
+                        Request::RequestSet {
+                            id,
+                            state: state.to_string(),
+                            note,
+                            by,
+                        }
+                    }
+                }
             }
         }
         "star" => Request::Star {
@@ -427,6 +483,9 @@ fn print_text(req: &Request, r: &Response) {
             if let Some(sp) = x.current_sprint() {
                 println!("sprint: {} ({:?})", sp.name, sp.state);
             }
+            for l in &x.links {
+                println!("link: {} {} {}", l.relation, l.key, l.summary);
+            }
             if !x.labels.is_empty() {
                 println!("labels: {}", x.labels.join(", "));
             }
@@ -504,6 +563,25 @@ fn print_text(req: &Request, r: &Response) {
             "{}",
             serde_json::to_string_pretty(&data).unwrap_or_default()
         ),
+        Request::Requests { .. } => {
+            let rows: Vec<control::RequestRow> = serde_json::from_value(data).unwrap_or_default();
+            for x in &rows {
+                println!(
+                    "#{:<4} {:<10} {:<34} {}{}",
+                    x.request.id,
+                    x.request.key,
+                    x.status,
+                    x.what,
+                    if x.request.note.is_empty() {
+                        String::new()
+                    } else {
+                        format!("  ({})", x.request.note)
+                    }
+                );
+            }
+            println!("{}", r.message);
+        }
+        Request::RequestPrompt { .. } => print!("{}", r.message),
         _ => println!("{}", r.message),
     }
 }
@@ -552,7 +630,7 @@ fn recover(ctx: &Ctx, write: bool) -> Result<()> {
         }
     );
     if r.differences.is_empty() {
-        println!("the queue, notes and stars match the journal: nothing to recover");
+        println!("the queue, notes, stars and requests match the journal: nothing to recover");
     }
     for d in &r.differences {
         println!("  {d}");

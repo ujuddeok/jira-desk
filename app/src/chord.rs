@@ -1,7 +1,7 @@
 //! The chord hint: while a chord is half typed (⌘K, `f`, …) a card lists the keys that can
 //! follow it and what each does, read from the live keymap, so a user's `keymap.json` shows
 //! too. GPUI drops a half-typed chord after a fixed second; when that happens the chord is
-//! held open instead, card and all, until the next key (as in Odin).
+//! held open instead, card and all, until the next key (as in Chorong).
 
 use gpui::{Action, App, KeyContext, Keystroke, Window};
 use std::time::{Duration, Instant};

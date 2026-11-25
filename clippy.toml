@@ -1,0 +1,8 @@
+# Every scrollable area stretches at its ends (overscroll); app/src/scroll.rs is the one way in.
+disallowed-methods = [
+    { path = "gpui::StatefulInteractiveElement::overflow_y_scroll", reason = "scroll through app/src/scroll.rs (ScrollArea::vertical/both, scroll::uniform_list/list + .wrap), which adds overscroll; see its module docs" },
+    { path = "gpui::StatefulInteractiveElement::overflow_x_scroll", reason = "scroll through app/src/scroll.rs (ScrollArea::vertical/both, scroll::uniform_list/list + .wrap), which adds overscroll; see its module docs" },
+    { path = "gpui::StatefulInteractiveElement::overflow_scroll", reason = "scroll through app/src/scroll.rs (ScrollArea::vertical/both, scroll::uniform_list/list + .wrap), which adds overscroll; see its module docs" },
+    { path = "gpui::uniform_list", reason = "scroll through app/src/scroll.rs (ScrollArea::vertical/both, scroll::uniform_list/list + .wrap), which adds overscroll; see its module docs" },
+    { path = "gpui::list", reason = "scroll through app/src/scroll.rs (ScrollArea::vertical/both, scroll::uniform_list/list + .wrap), which adds overscroll; see its module docs" },
+]

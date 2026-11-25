@@ -247,15 +247,17 @@ pub fn suggestions(m: &Model, o: &Omni) -> Vec<Suggestion> {
 /// what it shows).
 pub fn chips(m: &Model) -> Vec<(Field, String, String)> {
     let mut out = Vec::new();
-    let sprint = match &m.filter.sprint {
-        SprintSel::Active => Some("active".to_string()),
-        SprintSel::Backlog => Some("backlog".to_string()),
-        SprintSel::Id(id) => Some(id.to_string()),
-        SprintSel::All => None,
+    let sprint: Vec<String> = match &m.filter.sprint {
+        SprintSel::Active => vec!["active".to_string()],
+        SprintSel::Backlog => vec!["backlog".to_string()],
+        SprintSel::Id(_) | SprintSel::Ids(_) => {
+            m.filter.sprint.ids().iter().map(u64::to_string).collect()
+        }
+        SprintSel::All => Vec::new(),
     };
     for f in Field::ALL {
         let chosen: Vec<String> = match f {
-            Field::Sprint => sprint.iter().cloned().collect(),
+            Field::Sprint => sprint.clone(),
             Field::Assignee => m.filter.assignees.iter().cloned().collect(),
             Field::Label => m.filter.labels.iter().cloned().collect(),
             Field::Epic => m.filter.epics.iter().cloned().collect(),
@@ -338,7 +340,11 @@ pub fn apply_query(m: &mut Model, query: &str) -> Result<String, String> {
 /// Removes one chip's filter.
 pub fn remove_chip(m: &mut Model, field: Field, id: &str) {
     if field == Field::Sprint {
-        m.filter.sprint = SprintSel::All;
+        // One of several sprints goes; the last (or Active, Backlog) leaves all issues.
+        m.filter.sprint = match (&m.filter.sprint, id.parse::<u64>()) {
+            (SprintSel::Ids(_), Ok(n)) => m.filter.sprint.toggled(n),
+            _ => SprintSel::All,
+        };
         m.refilter();
     } else {
         apply_filter(m, &field.purpose(), id);
@@ -379,7 +385,7 @@ pub fn filter_choices(m: &Model, purpose: &Purpose) -> (String, Vec<Item>) {
                             m.facets.sprint_points.get(&sp.id).copied().unwrap_or(0.)
                         )
                     ),
-                    checked: m.filter.sprint == SprintSel::Id(sp.id),
+                    checked: m.filter.sprint.has(sp.id),
                 });
             }
             items.push(Item {
@@ -394,7 +400,7 @@ pub fn filter_choices(m: &Model, purpose: &Purpose) -> (String, Vec<Item>) {
                 detail: with_points(m.facets.all, m.facets.all_points),
                 checked: m.filter.sprint == SprintSel::All,
             });
-            ("Sprint".into(), items)
+            ("Sprints (Enter adds or removes one; Active, Backlog or All replace them; Esc closes)".into(), items)
         }
         Purpose::FilterAssignee => {
             let mut items: Vec<Item> = vec![Item {
@@ -502,20 +508,22 @@ pub fn filter_choices(m: &Model, purpose: &Purpose) -> (String, Vec<Item>) {
     }
 }
 
-/// Chooses a value of a filter: sprint is one of; the others toggle the value.
+/// Chooses a value of a filter: Active, Backlog or All replace the sprint choice; a sprint and
+/// any other value is added, or taken out if it was chosen.
 pub fn apply_filter(m: &mut Model, purpose: &Purpose, id: &str) {
     toggle(&mut m.filter, purpose, id);
     m.refilter();
 }
 
-/// What `apply_filter` does to a filter: a sprint is set, any other value toggled.
+/// What `apply_filter` does to a filter.
 fn toggle(filter: &mut jdesk_core::filter::Filter, purpose: &Purpose, id: &str) {
     if *purpose == Purpose::FilterSprint {
         filter.sprint = match id {
             "active" => SprintSel::Active,
             "backlog" => SprintSel::Backlog,
             "all" => SprintSel::All,
-            id => SprintSel::Id(id.parse().unwrap_or(0)),
+            // A sprint is added to those chosen, or taken out (`sp:44 sp:45`, the picker).
+            id => filter.sprint.toggled(id.parse().unwrap_or(0)),
         };
     } else {
         let set = match purpose {

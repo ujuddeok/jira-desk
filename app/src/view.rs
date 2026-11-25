@@ -19,7 +19,7 @@ use cho_layout_ui::shell::{Shell, bind_actions};
 use gpui::{
     Action, AnyElement, App, ClipboardItem, Context, Entity, FocusHandle, Focusable, FontWeight,
     InteractiveElement, IntoElement, KeyContext, KeyDownEvent, ParentElement, Render,
-    StatefulInteractiveElement, Styled, Window, div, prelude::FluentBuilder, px, uniform_list,
+    StatefulInteractiveElement, Styled, Window, div, prelude::FluentBuilder, px,
 };
 use jdesk_core::control::{Request, Response};
 use jdesk_core::filter::Sort;
@@ -41,6 +41,8 @@ pub struct Prompt {
 
 #[derive(Clone, Debug)]
 pub enum PromptFor {
+    /// A request on an issue: its key and kind (description, parent, link, fix-version, other).
+    Request(String, String),
     Summary(String),
     Points(String),
     Comment(String),
@@ -51,6 +53,8 @@ pub enum Overlay {
     Prompt(Prompt),
     ConfirmApply(usize),
     Help,
+    /// One request, whole (a click on its line in the Notes pane).
+    Request(u64),
 }
 
 pub struct DeskView {
@@ -70,6 +74,9 @@ pub struct DeskView {
     /// A Board focus mode opened (⌥6, or added to a page when there was none): closed when
     /// focus mode ends, as a series closes its tabs.
     board_opened: Option<PaneId>,
+    /// The layout from before the Board was added for focus mode, put back when it ends (so
+    /// the panes get their widths back, not just the Board's neighbour).
+    board_restore: Option<Workspace>,
     /// The chord being typed, for its hint card (see `chord`).
     chord: crate::chord::Chord,
     /// Whether a shell picker was open at the last redraw: the key context depends on it.
@@ -229,6 +236,7 @@ impl DeskView {
             shift_taps: Default::default(),
             series_opened: Vec::new(),
             board_opened: None,
+            board_restore: None,
             chord: Default::default(),
             shell_overlay: false,
             focus_shape: None,
@@ -239,13 +247,18 @@ impl DeskView {
     }
 
     fn model_changed(&mut self, cx: &mut Context<Self>) {
-        let (open, more, preview) = self.model.update(cx, |m, _| {
+        let (open, more, preview, request) = self.model.update(cx, |m, _| {
             (
                 m.pending_open.take(),
                 m.pending_more.take(),
                 std::mem::take(&mut m.pending_preview),
+                m.pending_request.take(),
             )
         });
+        if let Some(id) = request {
+            self.overlay = Some(Overlay::Request(id));
+            cx.notify();
+        }
         if preview {
             self.preview_beside_board(cx);
         }
@@ -258,6 +271,8 @@ impl DeskView {
                 MoreOf::Labels => self.open_picker(Purpose::FilterLabel, cx),
             }
         }
+        // Notes follows the current issue, except while it (or Filters) has focus.
+        self.model.update(cx, |m, _| m.follow_for_notes());
         let selected = self.model.read(cx).selected.clone();
         if selected != self.last_selected {
             self.last_selected = selected;
@@ -320,6 +335,7 @@ impl DeskView {
         if changed {
             self.model.update(cx, |m, cx| {
                 m.focus = focus;
+                m.follow_for_notes();
                 m.generation += 1;
                 cx.notify();
             });
@@ -328,17 +344,26 @@ impl DeskView {
         let in_focus = self.shell.read(cx).workspace().in_focus();
         // A Board that focus mode opened closes with it, rather than staying in the layout.
         if !in_focus && let Some(board) = self.board_opened.take() {
+            let restore = self.board_restore.take();
             self.shell.update(cx, |sh, cx| {
                 let _ = sh.update_workspace(cx, |ws| {
-                    if ws.content(board).is_some() {
-                        ws.close(board)?;
+                    match restore {
+                        // The layout as it was: every pane's width back, the Board gone.
+                        Some(before) => *ws = before,
+                        None if ws.content(board).is_some() => ws.close(board)?,
+                        None => {}
                     }
                     Ok(())
                 });
             });
         }
         if !in_focus && !self.model.read(cx).series.is_empty() {
-            self.model.update(cx, |m, _| m.series.clear());
+            self.model.update(cx, |m, cx| {
+                m.series.clear();
+                // The series' own message ("Esc ends") would otherwise stay up after it ended.
+                m.note("Focus series ended: its tabs are closed");
+                cx.notify();
+            });
             let opened = std::mem::take(&mut self.series_opened);
             self.shell.update(cx, |sh, cx| {
                 let _ = sh.update_workspace(cx, |ws| {
@@ -525,6 +550,8 @@ impl DeskView {
     /// Shows the board maximised (Esc, or the shell's restore, goes back to the panes).
     fn open_board(&mut self, cx: &mut Context<Self>) {
         let existed = self.find_pane(cx, |c| *c == placeholder(BOARD)).is_some();
+        let before = (!existed && !self.shell.read(cx).workspace().in_focus())
+            .then(|| self.shell.read(cx).workspace().clone());
         self.focus_pane(placeholder(BOARD), cx);
         if !existed && let Some(p) = self.find_pane(cx, |c| *c == placeholder(BOARD)) {
             let now = jdesk_core::now() as u64;
@@ -533,9 +560,43 @@ impl DeskView {
             });
             if self.shell.read(cx).workspace().in_focus() {
                 self.board_opened = Some(p);
+                self.board_restore = before;
             }
             self.shell_changed(cx);
         }
+    }
+
+    /// ⌘Enter / ⌘⇧Enter: the issue in a new pane at `edge` of the issue panes (the Preview's
+    /// group, else the focused one), as Chorong opens a file beside. An issue that already has
+    /// a pane is shown there instead.
+    fn open_issue_at(&mut self, key: &str, edge: Edge, cx: &mut Context<Self>) {
+        let existing = self.find_pane(
+            cx,
+            |c| matches!(c, PaneContent::Editor { path, .. } if path == key),
+        );
+        let preview = self.find_pane(cx, |c| PaneFocus::of(Some(c)) == PaneFocus::Preview);
+        self.shell.update(cx, |sh, cx| {
+            let _ = sh.update_workspace(cx, |ws| {
+                if let Some(p) = existing {
+                    ws.reveal(p)?;
+                    return ws.activate(p);
+                }
+                let group = preview
+                    .and_then(|p| ws.group_of(p))
+                    .or_else(|| ws.focused().and_then(|p| ws.group_of(p)));
+                let content = PaneContent::Editor {
+                    path: key.to_string(),
+                    caret: 0,
+                };
+                let pane = ws.open(content, group.map(|group| Target::Beside { group, edge }))?;
+                if ws.in_focus() && ws.group_of(pane).is_none() {
+                    ws.place_on_empty_page(pane)?;
+                }
+                ws.reveal(pane)?;
+                ws.activate(pane)
+            });
+        });
+        self.shell_changed(cx);
     }
 
     /// Opens an issue in its own tab, beside the Preview pane (or focuses the tab it has).
@@ -646,7 +707,7 @@ impl DeskView {
         });
     }
 
-    /// Go to issue… with an issue tab focused: the tab shows `key` instead (as Odin's file
+    /// Go to issue… with an issue tab focused: the tab shows `key` instead (as Chorong's file
     /// picker replaces what the active code pane shows). If `key` already has a tab, that tab
     /// is shown instead. False when no issue tab is focused.
     fn swap_focused_issue_tab(&mut self, key: &str, cx: &mut Context<Self>) -> bool {
@@ -681,7 +742,7 @@ impl DeskView {
         true
     }
 
-    /// Building a focus page (as Odin adds files): `key` goes on the current page at `edge`
+    /// Building a focus page (as Chorong adds files): `key` goes on the current page at `edge`
     /// of the focused pane. An issue already open in the tray comes back from there; one
     /// already on the page is just focused. On an empty page it becomes the page's only pane.
     ///
@@ -767,8 +828,77 @@ impl DeskView {
         let m = self.model.read(cx);
         let mut start: Option<String> = None;
         let (title, items): (String, Vec<Item>) = match &purpose {
-            Purpose::GoToIssue | Purpose::AddToPage => (
-                if purpose == Purpose::AddToPage {
+            Purpose::SprintsShown => {
+                let shown = m.sprints_in_filters();
+                (
+                    "Sprints in the Filters pane (Enter shows or hides one; Esc closes)".into(),
+                    m.desk
+                        .sprints()
+                        .into_iter()
+                        .map(|sp| Item {
+                            id: sp.id.to_string(),
+                            label: sp.name.clone(),
+                            detail: format!(
+                                "{} · {} issues",
+                                match sp.state {
+                                    SprintState::Active => "active",
+                                    SprintState::Future => "next",
+                                    SprintState::Closed => "closed",
+                                },
+                                m.facets.sprints.get(&sp.id).map_or(0, |(_, n)| *n)
+                            ),
+                            checked: shown.contains(&sp.id),
+                        })
+                        .collect(),
+                )
+            }
+            Purpose::LinkHow(k) => {
+                let mut seen: Vec<String> = Vec::new();
+                let mut items = Vec::new();
+                for t in &m.desk.link_types {
+                    for phrase in [&t.outward, &t.inward] {
+                        let p = phrase.to_lowercase();
+                        if !seen.contains(&p) {
+                            seen.push(p.clone());
+                            items.push(Item {
+                                id: p.clone(),
+                                label: format!("{k} {p} …"),
+                                detail: t.name.clone(),
+                                checked: false,
+                            });
+                        }
+                    }
+                }
+                (format!("Link {k}: how?"), items)
+            }
+            Purpose::Parent(k) => {
+                start = m
+                    .effective_issue(k)
+                    .and_then(|i| i.parent.as_ref().map(|p| p.key.clone()));
+                (
+                    format!(
+                        "Parent of {k}: an epic (queued; {} applies)",
+                        state::apply_key()
+                    ),
+                    m.effective
+                        .iter()
+                        .filter(|i| i.kind.eq_ignore_ascii_case("epic") && i.key != *k)
+                        .map(|i| Item {
+                            id: i.key.clone(),
+                            label: format!("{}  {}", i.key, i.summary),
+                            detail: i.status.clone(),
+                            checked: start.as_deref() == Some(i.key.as_str()),
+                        })
+                        .collect(),
+                )
+            }
+            Purpose::GoToIssue | Purpose::AddToPage | Purpose::LinkTo(..) => (
+                if let Purpose::LinkTo(k, how) = &purpose {
+                    format!(
+                        "{k} {how} …: which issue? (queued; {} applies)",
+                        state::apply_key()
+                    )
+                } else if purpose == Purpose::AddToPage {
                     "Add issues or the Board to the page · Enter to the right, ⇧Enter below, Esc when done"
                         .into()
                 } else if let PaneFocus::Issue(k) = &m.focus {
@@ -970,6 +1100,40 @@ impl DeskView {
                 )
             }
             Purpose::Command => return,
+            Purpose::RequestKind(k) => (
+                format!("A request on {k}: something to make true of it outside Jira Desk"),
+                [
+                    (
+                        "description",
+                        "Description rewrite",
+                        "say what should change; an agent or you does it",
+                    ),
+                    (
+                        "link",
+                        "Link to another issue",
+                        "blocks, is blocked by, relates to… — seen by sync",
+                    ),
+                    (
+                        "parent",
+                        "Parent (epic)",
+                        "the issue it should sit under — seen by sync",
+                    ),
+                    (
+                        "fix-version",
+                        "Fix version",
+                        "add or take off a version — seen by sync",
+                    ),
+                    ("other", "Anything else", "in your words"),
+                ]
+                .into_iter()
+                .map(|(id, label, detail)| Item {
+                    id: id.into(),
+                    label: label.into(),
+                    detail: detail.into(),
+                    checked: false,
+                })
+                .collect(),
+            ),
             Purpose::Resolve(k) => {
                 let r = m.desk.identities.open_review(k);
                 let what = r.map(|r| r.summary()).unwrap_or_default();
@@ -1023,6 +1187,7 @@ impl DeskView {
         let focus = self.model.read(cx).focus.clone();
         let ctx = format!("JiraDesk {}", focus.context());
         let in_focus = self.shell.read(cx).workspace().in_focus();
+        let auto_advance = self.model.read(cx).auto_advance;
         let mut actions: Vec<Box<dyn Action>> = Vec::new();
         let mut items = Vec::new();
         for (section, rows) in commands() {
@@ -1044,10 +1209,17 @@ impl DeskView {
                     .or_else(|| keys::label(action.as_ref(), window))
                     .unwrap_or_default();
                 // In a focus layout, closing sends the pane to the tray: say so.
-                let what = if in_focus && action.name() == "chorong::ClosePane" {
-                    "Close pane (to the tray)"
+                // A switch is named for what choosing it does now.
+                let what: String = if in_focus && action.name() == "chorong::ClosePane" {
+                    "Close pane (to the tray)".into()
+                } else if action.name() == "jdesk::ToggleAutoAdvance" {
+                    if auto_advance {
+                        "Disable auto-advance".into()
+                    } else {
+                        "Enable auto-advance".into()
+                    }
                 } else {
-                    what
+                    what.into()
                 };
                 items.push(Item {
                     id: actions.len().to_string(),
@@ -1387,8 +1559,88 @@ impl DeskView {
                 Some(Overlay::Prompt(_)) => Some("prompt".to_string()),
                 Some(Overlay::ConfirmApply(_)) => Some("confirm apply".to_string()),
                 Some(Overlay::Help) => Some("help".to_string()),
+                Some(Overlay::Request(id)) => Some(format!("request #{id}")),
             },
         })
+    }
+
+    /// The focused issue pane's selectable text, by name: the pane and the issue it shows.
+    fn focused_text_pane(&self, cx: &App) -> Option<String> {
+        let ws = self.shell.read(cx).workspace();
+        let pane = ws.focused()?;
+        let key = match PaneFocus::of(ws.content(pane)) {
+            PaneFocus::Preview => self.model.read(cx).selected.clone()?,
+            PaneFocus::Issue(k) => k,
+            _ => return None,
+        };
+        Some(crate::panes::text_area(
+            &crate::panes::pane_name(pane),
+            &key,
+        ))
+    }
+
+    /// ⌘C in the issue pane: the selected text to the clipboard.
+    fn copy_selection(&mut self, with_link: bool, cx: &mut Context<Self>) {
+        let Some(pane) = self.focused_text_pane(cx) else {
+            return;
+        };
+        let (text, link) = {
+            let m = self.model.read(cx);
+            let text = m
+                .sel(&pane)
+                .filter(|s| !s.is_empty())
+                .map(|s| m.text_map(&pane).text(&s));
+            // The area is "pane|KEY": the issue the text came from.
+            let key = pane.rsplit('|').next().unwrap_or_default();
+            let link = m
+                .effective_issue(key)
+                .map(|i| format!("{key} {}: {}", i.summary, m.desk.browse_url(key)));
+            (text, link)
+        };
+        self.model.update(cx, |m, cx| {
+            let n = text.as_ref().map(|t| t.chars().count());
+            let copied = match (text, with_link.then_some(link).flatten()) {
+                (Some(t), Some(l)) => Some(format!("{t}\n— {l}")),
+                (Some(t), None) => Some(t),
+                (None, Some(l)) => Some(l),
+                (None, None) => None,
+            };
+            match copied {
+                Some(c) => {
+                    cx.write_to_clipboard(ClipboardItem::new_string(c));
+                    m.note(match (n, with_link) {
+                        (Some(n), false) => {
+                            format!("Copied {n} character{}", if n == 1 { "" } else { "s" })
+                        }
+                        (Some(n), true) => format!(
+                            "Copied {n} character{} with the issue's link",
+                            if n == 1 { "" } else { "s" }
+                        ),
+                        (None, _) => "Copied the issue's link".to_string(),
+                    });
+                }
+                None => m.note(
+                    "Nothing selected: drag over the text first (⌘A selects it all; ⇧⌘C copies the link)",
+                ),
+            }
+            cx.notify();
+        });
+    }
+
+    /// ⌘A in the issue pane: all its text.
+    fn select_all_text(&mut self, cx: &mut Context<Self>) {
+        let Some(pane) = self.focused_text_pane(cx) else {
+            return;
+        };
+        self.model.update(cx, |m, cx| {
+            if let Some(end) = m.text_map(&pane).last() {
+                m.text_sel
+                    .borrow_mut()
+                    .insert(pane, crate::select::TextSel::new((0, 0), end));
+                m.generation += 1;
+                cx.notify();
+            }
+        });
     }
 
     /// Selects `key` in the list if it's there, else opens it in a tab.
@@ -1528,10 +1780,24 @@ impl DeskView {
             | Purpose::FilterLabel
             | Purpose::FilterEpic
             | Purpose::FilterStatus
-            | Purpose::FilterTags) => model.update(cx, |m, cx| {
-                crate::omni::apply_filter(m, &p, &item.id);
-                cx.notify();
-            }),
+            | Purpose::FilterTags) => {
+                model.update(cx, |m, cx| {
+                    crate::omni::apply_filter(m, &p, &item.id);
+                    cx.notify();
+                });
+                // Active, Backlog and All replace the sprints chosen: the ticks come from the
+                // filter, not from flipping the one chosen.
+                if p == Purpose::FilterSprint {
+                    let (_, fresh) = crate::omni::filter_choices(self.model.read(cx), &p);
+                    if let Some(Overlay::Picker(pk)) = &mut self.overlay {
+                        for it in pk.items.iter_mut() {
+                            if let Some(f) = fresh.iter().find(|f| f.id == it.id) {
+                                it.checked = f.checked;
+                            }
+                        }
+                    }
+                }
+            }
             Purpose::Sort => model.update(cx, |m, cx| {
                 if let Some(so) = Sort::ALL.iter().find(|so| format!("{so:?}") == item.id) {
                     m.filter.sort = *so;
@@ -1614,7 +1880,7 @@ impl DeskView {
                 model.update(cx, |m, cx| {
                     match m.desk.toggle_tag(&k, &tag) {
                         Ok(()) => {
-                            m.rebuild();
+                            m.rebuild_after_change(&k, false);
                             let on = m.desk.sidecar.local(&k).tags.contains(&tag);
                             m.note(format!(
                                 "{} #{tag} on {k}",
@@ -1630,6 +1896,27 @@ impl DeskView {
                     close_now = false;
                 }
             }
+            Purpose::RequestKind(k) => {
+                self.open_prompt(PromptFor::Request(k, item.id.clone()), cx);
+                close_now = false;
+            }
+            Purpose::LinkHow(k) => {
+                self.open_picker(Purpose::LinkTo(k, item.id.clone()), cx);
+                close_now = false;
+            }
+            Purpose::SprintsShown => {
+                // The tick was flipped above: it says whether to show.
+                if let Ok(id) = item.id.parse::<u64>() {
+                    model.update(cx, |m, cx| {
+                        m.show_sprint_in_filters(id, !item.checked);
+                        cx.notify();
+                    });
+                }
+            }
+            Purpose::LinkTo(k, how) => {
+                self.queue_parsed(&k, "link", vec![how, item.id.clone()], cx)
+            }
+            Purpose::Parent(k) => self.queue_parsed(&k, "parent", vec![item.id.clone()], cx),
             Purpose::Command => {
                 self.run_next = item
                     .id
@@ -1642,7 +1929,8 @@ impl DeskView {
                 match item.id.as_str() {
                     "keep" => match m.desk.keep_after_review(&k) {
                         Ok(()) => m.note(format!(
-                            "{k}: same work. Its queued changes can be applied (⌘⇧A)"
+                            "{k}: same work. Its queued changes can be applied ({})",
+                            state::apply_key()
                         )),
                         Err(e) => m.error(e.to_string()),
                     },
@@ -1671,6 +1959,42 @@ impl DeskView {
     fn open_prompt(&mut self, purpose: PromptFor, cx: &mut Context<Self>) {
         let m = self.model.read(cx);
         let p = match &purpose {
+            PromptFor::Request(k, kind) => {
+                let (title, hint, multiline) = match kind.as_str() {
+                    "description" => (
+                        format!("Description rewrite on {k}: what should change"),
+                        "In your words; an agent (Copy for agent) or you makes it in Jira · ⌘Enter saves · Esc cancels",
+                        true,
+                    ),
+                    "link" => (
+                        format!("Link {k} to: how and which issue"),
+                        "e.g. blocks DEMO-40, is blocked by DEMO-12, relates to DEMO-7 · Enter saves",
+                        false,
+                    ),
+                    "parent" => (
+                        format!("Parent of {k}: the issue key"),
+                        "e.g. DEMO-5 (an epic, for most issues) · Enter saves",
+                        false,
+                    ),
+                    "fix-version" => (
+                        format!("Fix version on {k}"),
+                        "+NAME adds it, -NAME takes it off: +2.3 · Enter saves",
+                        false,
+                    ),
+                    _ => (
+                        format!("A request on {k}"),
+                        "In your words · ⌘Enter saves · Esc cancels",
+                        true,
+                    ),
+                };
+                Prompt {
+                    title,
+                    hint: hint.into(),
+                    area: TextArea::new("", multiline),
+                    purpose,
+                    error: None,
+                }
+            }
             PromptFor::Summary(k) => Prompt {
                 title: format!("Summary of {k}"),
                 hint: "Enter queues the change · Esc cancels".into(),
@@ -1725,7 +2049,42 @@ impl DeskView {
             return;
         };
         let text = p.area.text.clone();
+        if let PromptFor::Request(k, kind) = &p.purpose {
+            let req = Request::RequestAdd {
+                key: k.clone(),
+                kind: kind.clone(),
+                value: text,
+            };
+            // Announce the change, so the Notes pane (and the row's flag) redraw at once.
+            let r = self.model.update(cx, |m, cx| {
+                cx.notify();
+                match jdesk_core::control::data(&mut m.desk, &req) {
+                    Ok(resp) if resp.ok => {
+                        m.rebuild();
+                        m.note(format!(
+                            "{} (Notes shows it; Copy for agent hands it over)",
+                            resp.message
+                        ));
+                        Ok(())
+                    }
+                    Ok(resp) => Err(resp.message),
+                    Err(e) => Err(format!("{e:#}")),
+                }
+            });
+            match r {
+                Ok(()) => self.overlay = None,
+                Err(e) => {
+                    if let Some(Overlay::Prompt(p)) = &mut self.overlay {
+                        p.error = Some(e);
+                    }
+                }
+            }
+            cx.notify();
+            return;
+        }
         let edit = match &p.purpose {
+            // Handled above: a request isn't a queued change.
+            PromptFor::Request(..) => return,
             PromptFor::Summary(k) => {
                 if text.trim().is_empty() {
                     p.error = Some("A summary can't be empty".into());
@@ -1800,7 +2159,7 @@ impl DeskView {
             .then(|| cx.read_from_clipboard().and_then(|c| c.text()))
             .flatten();
         // Adding issues to a page: Backspace on an empty query goes back to the tray (as the
-        // Files chip does in Odin).
+        // Files chip does in Chorong).
         if k.key == "backspace"
             && !k.modifiers.modified()
             && matches!(&self.overlay, Some(Overlay::Picker(p))
@@ -1814,7 +2173,10 @@ impl DeskView {
             Some(Overlay::Picker(p)) => {
                 let e = p.input.key(k, paste.as_deref());
                 if e == Edited::Text {
-                    if matches!(p.purpose, Purpose::GoToIssue | Purpose::AddToPage) {
+                    if matches!(
+                        p.purpose,
+                        Purpose::GoToIssue | Purpose::AddToPage | Purpose::LinkTo(..)
+                    ) {
                         p.scope = omni::picker_scope(self.model.read(cx), &p.input.text);
                     }
                     p.requery();
@@ -1908,7 +2270,7 @@ impl DeskView {
                 self.overlay = None;
                 self.model.update(cx, |m, cx| m.start_apply(None, cx));
             }
-            Some(Overlay::Help) => self.overlay = None,
+            Some(Overlay::Help | Overlay::Request(_)) => self.overlay = None,
             None if self.model.read(cx).search.is_some() => self.search_enter(cx),
             None => {}
         }
@@ -1931,6 +2293,18 @@ impl DeskView {
             self.add_issue_to_page(&k, Edge::Bottom, cx);
         }
         cx.notify();
+    }
+
+    /// Queues a change as `jdesk change KEY FIELD VALUE…` would, with the same checks (a
+    /// sub-task's parent, a link phrase this site doesn't have): refused ones say why.
+    fn queue_parsed(&mut self, key: &str, field: &str, value: Vec<String>, cx: &mut Context<Self>) {
+        self.model.update(cx, |m, cx| {
+            match jdesk_core::control::parse_change(&m.desk, key, field, &value) {
+                Ok(edit) => m.queue(key, edit),
+                Err(e) => m.error(format!("{e:#}")),
+            }
+            cx.notify();
+        });
     }
 
     /// Back from adding issues to Bring from tray… (Backspace on an empty query, or the
@@ -2110,14 +2484,53 @@ impl DeskView {
             PaneFocus::Filters => self.toggle_filter_row(cx),
             PaneFocus::Notes => self.edit_note(cx),
             _ => {
+                let from_list = focus == PaneFocus::Issues;
                 if let Some(k) = self.model.read(cx).current_key() {
                     self.open_issue_tab(&k, cx);
                 }
+                self.advance_after_open(from_list, cx);
             }
         }
     }
 
+    /// With auto-advance on, opening an issue from the List (Enter, o, ⌘Enter, ⌘⇧Enter) moves
+    /// the List on to the next issue and keeps the keyboard there, for opening a run of them.
+    fn advance_after_open(&mut self, from_list: bool, cx: &mut Context<Self>) {
+        if !from_list || !self.model.read(cx).auto_advance {
+            return;
+        }
+        self.model.update(cx, |m, cx| {
+            if let Some(row) = m.selected_row()
+                && row + 1 < m.visible.len()
+            {
+                m.select_row(row + 1);
+            }
+            cx.notify();
+        });
+        self.focus_pane(placeholder(ISSUES), cx);
+    }
+
     fn toggle_filter_row(&mut self, cx: &mut Context<Self>) {
+        self.toggle_filter_row_with(false, cx)
+    }
+
+    /// ⇧Space in Filters: a range of sprints (see `Model::range_filter_row`).
+    fn range_filter_row(&mut self, cx: &mut Context<Self>) {
+        let row = {
+            let m = self.model.read(cx);
+            m.filter_rows().get(m.filter_cursor).cloned()
+        };
+        if let Some(row) = row {
+            self.model.update(cx, |m, cx| {
+                m.range_filter_row(&row);
+                cx.notify();
+            });
+        }
+    }
+
+    /// Enter (or a click) on a Filters row; with `add` (Space), a sprint row adds that sprint to
+    /// those shown rather than showing only it.
+    fn toggle_filter_row_with(&mut self, add: bool, cx: &mut Context<Self>) {
         let (row, more) = {
             let m = self.model.read(cx);
             let rows = m.filter_rows();
@@ -2138,7 +2551,11 @@ impl DeskView {
             );
         } else if let Some(row) = row {
             self.model.update(cx, |m, cx| {
-                m.toggle_filter_row(&row);
+                if add {
+                    m.add_filter_row(&row);
+                } else {
+                    m.toggle_filter_row(&row);
+                }
                 cx.notify();
             });
         }
@@ -2239,6 +2656,7 @@ impl DeskView {
         };
         let sync_err = !busy && m.sync.error.is_some();
         let (pending, held) = m.pending_and_held();
+        let requests_open = m.desk.requests.open_count();
         let attention = m
             .desk
             .queue
@@ -2319,6 +2737,20 @@ impl DeskView {
                         .when_some(apply_key, |d, k| {
                             d.child(div().text_color(c.text_muted).child(s(k)))
                         }),
+                )
+            })
+            // Requests: things to make true outside Jira Desk (f r lists their issues).
+            .when(requests_open > 0, |d| {
+                d.child(
+                    div()
+                        .flex()
+                        .items_center()
+                        .gap(px(5.))
+                        .child(icon("flag", 12., c.text_accent))
+                        .child(s(format!(
+                            "{requests_open} request{} open",
+                            if requests_open == 1 { "" } else { "s" }
+                        ))),
                 )
             })
             .when_some(notice.filter(|_| !in_mode), |d, n| {
@@ -2413,7 +2845,11 @@ impl DeskView {
                         .child("No match")
                         .into_any_element()
                 } else {
-                    uniform_list("picker", n, move |range, _w, cx| {
+                    let (over, stretch) = {
+                        let m = self.model.read(cx);
+                        (m.scroll_areas.get("picker").overscroll(), m.stretch())
+                    };
+                    crate::scroll::uniform_list("picker", n, move |range, _w, cx| {
                         let Some(v) = view.upgrade() else {
                             return Vec::new();
                         };
@@ -2486,7 +2922,7 @@ impl DeskView {
                             })
                             .collect()
                     })
-                    .track_scroll(p.scroll.clone())
+                    .wrap(&over, &p.scroll, stretch)
                     .h(px((n.min(14) as f32) * 28.))
                     .into_any_element()
                 };
@@ -2626,7 +3062,110 @@ impl DeskView {
                     )
                     .into_any_element()
             }
-            Overlay::Help => help(&c, window, &self.help_scroll),
+            Overlay::Help => {
+                let m = self.model.read(cx);
+                let area = m
+                    .scroll_areas
+                    .get("help")
+                    .tracking(self.help_scroll.clone());
+                help(&c, window, &area, m.stretch())
+            }
+            Overlay::Request(id) => {
+                let m = self.model.read(cx);
+                let r = m.desk.requests.get(*id)?;
+                let summary = m
+                    .effective_issue(&r.key)
+                    .map(|i| i.summary.clone())
+                    .unwrap_or_default();
+                let full = match &r.want {
+                    jdesk_core::requests::Want::Description { instructions: t }
+                    | jdesk_core::requests::Want::Other { text: t } => Some(t.clone()),
+                    _ => None,
+                };
+                let what = match &r.want {
+                    jdesk_core::requests::Want::Description { .. } => {
+                        "Rewrite the description".to_string()
+                    }
+                    jdesk_core::requests::Want::Other { .. } => {
+                        "Something else, in your words".to_string()
+                    }
+                    w => w.describe(),
+                };
+                let status = crate::panes::request_status(r);
+                let body = div()
+                    .flex()
+                    .flex_col()
+                    .gap(px(8.))
+                    .text_size(px(13.))
+                    .line_height(px(19.))
+                    .child(div().font_weight(FontWeight::SEMIBOLD).child(s(what)))
+                    .children(full.map(|t| div().text_color(c.text).child(s(t))))
+                    .when(!r.note.is_empty(), |d| {
+                        d.child(
+                            div()
+                                .text_size(px(12.))
+                                .text_color(c.text_muted)
+                                .child(s(format!("Last word: “{}”", r.note))),
+                        )
+                    });
+                let area = m.scroll_areas.get("request-dialog");
+                card(560.)
+                    .p(px(14.))
+                    .gap(px(10.))
+                    .child(
+                        div()
+                            .flex()
+                            .items_center()
+                            .gap(px(8.))
+                            .child(
+                                div()
+                                    .font_family(c.mono_font.clone())
+                                    .text_size(px(12.))
+                                    .text_color(c.text_muted)
+                                    .child(s(format!("Request #{} · {}", r.id, r.key))),
+                            )
+                            .child(
+                                div()
+                                    .flex_1()
+                                    .min_w_0()
+                                    .truncate()
+                                    .text_size(px(12.))
+                                    .text_color(c.text_muted)
+                                    .child(s(summary)),
+                            )
+                            .child(
+                                div()
+                                    .flex_none()
+                                    .text_size(px(11.5))
+                                    .text_color(if r.changed && r.state.is_open() {
+                                        c.text_accent
+                                    } else {
+                                        c.text_muted
+                                    })
+                                    .child(s(status)),
+                            ),
+                    )
+                    .child(area.vertical_max("request-dialog-body", m.stretch(), px(360.), body))
+                    .child(
+                        div()
+                            .text_size(px(11.5))
+                            .text_color(c.text_muted)
+                            .child(s(format!("Asked {}", state::since(r.created)))),
+                    )
+                    .child(crate::panes::request_buttons(
+                        &self.model,
+                        r,
+                        &c,
+                        "request-dialog",
+                    ))
+                    .child(
+                        div()
+                            .text_size(px(11.5))
+                            .text_color(c.text)
+                            .child("Esc or Enter closes"),
+                    )
+                    .into_any_element()
+            }
         };
         // Deferred, so it paints over the panes (cached views), as the shell's own pickers do.
         Some(
@@ -2751,6 +3290,19 @@ fn palette_group(section: &str) -> &'static str {
 /// Every command, by section: the help overlay and the command palette both read this, so
 /// they list the same things.
 fn commands() -> Vec<HelpSection> {
+    let mut sections = commands_fixed();
+    if let Some((_, rows)) = sections
+        .iter_mut()
+        .find(|(t, _)| *t == "Filtering the list")
+    {
+        for (i, label) in crate::state::chip_labels().into_iter().enumerate() {
+            rows.insert(i, (Box::new(ToggleStatusGroup(i + 1)), label));
+        }
+    }
+    sections
+}
+
+fn commands_fixed() -> Vec<HelpSection> {
     vec![
         (
             "Moving around",
@@ -2859,6 +3411,8 @@ fn commands() -> Vec<HelpSection> {
                 (Box::new(FilterTags), "Your tags…"),
                 (Box::new(ToggleReviewOnly), "Only waiting for review"),
                 (Box::new(TogglePendingOnly), "Only with queued changes"),
+                (Box::new(ChooseShownSprints), "Choose which sprints show…"),
+                (Box::new(ToggleRequestsOnly), "Only with open requests"),
                 (Box::new(ChooseSort), "Sort…"),
                 (Box::new(ClearFilters), "Clear filters"),
             ],
@@ -2885,8 +3439,24 @@ fn commands() -> Vec<HelpSection> {
                 (Box::new(EditNote), "Edit your note (Notes pane)"),
                 (Box::new(ToggleStar), "Star"),
                 (Box::new(EditTags), "Add or remove tags…"),
+                (Box::new(OpenIssueRight), "Open in a new pane to the right"),
+                (Box::new(OpenIssueBelow), "Open in a new pane below"),
+                (Box::new(LinkIssue), "Link to another issue…"),
+                (Box::new(SetParent), "Set parent (epic)…"),
+                (
+                    Box::new(AddRequest),
+                    "Add a request (to do outside Jira Desk)…",
+                ),
+                (
+                    Box::new(CopyRequestForAgent),
+                    "Copy its open request for an agent",
+                ),
                 (Box::new(TogglePick), "Pick for a focus series"),
                 (Box::new(ClearPicks), "Clear picks"),
+                (
+                    Box::new(ToggleAutoAdvance),
+                    "Enable or disable auto-advance",
+                ),
                 (
                     Box::new(FocusSeries),
                     "Open picked (or listed) issues as focus pages",
@@ -2898,6 +3468,15 @@ fn commands() -> Vec<HelpSection> {
                 (Box::new(CopyKey), "Copy key"),
                 (Box::new(CopyLink), "Copy link"),
                 (Box::new(OpenInBrowser), "Open in browser"),
+                (
+                    Box::new(CopySelection),
+                    "Copy the selected text (issue pane)",
+                ),
+                (
+                    Box::new(CopyWithLink),
+                    "Copy the selected text with the issue's link (issue pane)",
+                ),
+                (Box::new(SelectAllText), "Select all its text (issue pane)"),
                 (Box::new(Refresh), "Refresh now"),
                 (
                     Box::new(FullRefresh),
@@ -2927,7 +3506,12 @@ fn commands() -> Vec<HelpSection> {
 }
 
 /// The keys, read from the keymap (so a remapped key shows as remapped).
-fn help(c: &Colors, window: &Window, scroll: &gpui::ScrollHandle) -> AnyElement {
+fn help(
+    c: &Colors,
+    window: &Window,
+    area: &crate::scroll::ScrollArea,
+    stretch: crate::overscroll::Stretch,
+) -> AnyElement {
     let sections = commands();
     let mut cols = div().flex().flex_wrap().gap(px(18.)).p(px(16.));
     for (title, rows) in sections {
@@ -2993,12 +3577,9 @@ fn help(c: &Colors, window: &Window, scroll: &gpui::ScrollHandle) -> AnyElement 
                 ),
         )
         .child(
-            div()
-                .id("help")
+            area.vertical("help", stretch, div().child(cols))
                 .flex_1()
-                .overflow_y_scroll()
-                .track_scroll(scroll)
-                .child(cols),
+                .min_h_0(),
         )
         .into_any_element()
 }
@@ -3031,7 +3612,7 @@ impl Render for DeskView {
             None if self.chord.is_held() => crate::chord::HELD_CONTEXT.to_string(),
             // A shell picker (Focus pane…, Add to page from the tray…) types a query. Its own
             // context sits deeper, but `JiraDesk` here would still match the app's
-            // single-letter keys and take the letters before the query sees them (as in Odin).
+            // single-letter keys and take the letters before the query sees them (as in Chorong).
             None if self.shell.read(cx).overlay_open() => "JiraPaneOverlay".to_string(),
             None => format!(
                 "JiraDesk {}{}",
@@ -3072,6 +3653,18 @@ impl Render for DeskView {
                 },
             ));
         let root = bind_actions(root, &self.shell);
+        let root = root.on_action(cx.listener(
+            |this: &mut Self, a: &ToggleStatusGroup, _w, cx: &mut Context<Self>| {
+                this.model.update(cx, |m, cx| {
+                    if let Some(name) = m.chip_names().get(a.0.saturating_sub(1)) {
+                        let name = name.clone();
+                        m.toggle_group(&name);
+                        m.generation += 1;
+                        cx.notify();
+                    }
+                })
+            },
+        ));
         let root = on!(root, cx,
             Refresh => |this: &mut Self, _w, cx: &mut Context<Self>| this.model.update(cx, |m, cx| m.start_sync(sync::Mode::Auto, cx)),
             FullRefresh => |this: &mut Self, _w, cx: &mut Context<Self>| this.model.update(cx, |m, cx| m.start_sync(sync::Mode::Full, cx)),
@@ -3094,7 +3687,27 @@ impl Render for DeskView {
             GoToIssue => |this: &mut Self, _w, cx: &mut Context<Self>| this.open_picker(Purpose::GoToIssue, cx),
             ShowHelp => |this: &mut Self, _w, cx: &mut Context<Self>| { this.overlay = Some(Overlay::Help); cx.notify(); },
             ShowPalette => |this: &mut Self, w, cx: &mut Context<Self>| this.open_palette(w, cx),
+            ToggleAutoAdvance => |this: &mut Self, _w, cx: &mut Context<Self>| this.model.update(cx, |m, cx| {
+                m.auto_advance = !m.auto_advance;
+                // Saved (prefs.json): the choice holds across launches, over config.toml's.
+                let mut prefs = state::Prefs::load(&m.desk.dir);
+                prefs.auto_advance = Some(m.auto_advance);
+                if let Err(e) = prefs.save(&m.desk.dir) {
+                    m.error(format!("Auto-advance not saved: {e}"));
+                } else {
+                    m.note(if m.auto_advance {
+                        "Auto-advance on: after a change from the List, the next issue is selected"
+                    } else {
+                        "Auto-advance off: you stay on the issue you changed"
+                    });
+                }
+                m.generation += 1;
+                cx.notify();
+            }),
             SearchTab => |this: &mut Self, _w, cx: &mut Context<Self>| this.search_tab(cx),
+            CopySelection => |this: &mut Self, _w, cx: &mut Context<Self>| this.copy_selection(false, cx),
+            CopyWithLink => |this: &mut Self, _w, cx: &mut Context<Self>| this.copy_selection(true, cx),
+            SelectAllText => |this: &mut Self, _w, cx: &mut Context<Self>| this.select_all_text(cx),
             SearchReopen => |this: &mut Self, _w, cx: &mut Context<Self>| this.search_reopen(cx),
             Quit => |_this: &mut Self, _w, cx: &mut Context<Self>| cx.quit(),
             FocusFilters => |this: &mut Self, _w, cx: &mut Context<Self>| this.focus_pane(placeholder(FILTERS), cx),
@@ -3112,8 +3725,11 @@ impl Render for DeskView {
             CursorLeft => |this: &mut Self, _w, cx: &mut Context<Self>| this.board_col(-1, cx),
             CursorRight => |this: &mut Self, _w, cx: &mut Context<Self>| this.board_col(1, cx),
             Confirm => |this: &mut Self, _w, cx: &mut Context<Self>| this.confirm(cx),
+            ToggleRange => |this: &mut Self, _w, cx: &mut Context<Self>| {
+                if this.model.read(cx).focus == PaneFocus::Filters { this.range_filter_row(cx) }
+            },
             Toggle => |this: &mut Self, _w, cx: &mut Context<Self>| {
-                if this.model.read(cx).focus == PaneFocus::Filters { this.toggle_filter_row(cx) } else { this.cursor(15, None, cx) }
+                if this.model.read(cx).focus == PaneFocus::Filters { this.toggle_filter_row_with(true, cx) } else { this.cursor(15, None, cx) }
             },
             Search => |this: &mut Self, _w, cx: &mut Context<Self>| {
                 this.model.update(cx, |m, cx| {
@@ -3134,6 +3750,42 @@ impl Render for DeskView {
             ToggleStarredOnly => |this: &mut Self, _w, cx: &mut Context<Self>| this.model.update(cx, |m, cx| { m.toggle_quick(state::Quick::Starred); m.refilter(); cx.notify(); }),
             ToggleNotedOnly => |this: &mut Self, _w, cx: &mut Context<Self>| this.model.update(cx, |m, cx| { m.toggle_quick(state::Quick::Noted); m.refilter(); cx.notify(); }),
             TogglePendingOnly => |this: &mut Self, _w, cx: &mut Context<Self>| this.model.update(cx, |m, cx| { m.toggle_quick(state::Quick::Pending); m.refilter(); cx.notify(); }),
+            ToggleRequestsOnly => |this: &mut Self, _w, cx: &mut Context<Self>| this.model.update(cx, |m, cx| { m.toggle_quick(state::Quick::Requests); m.refilter(); cx.notify(); }),
+            AddRequest => |this: &mut Self, _w, cx: &mut Context<Self>| this.with_issue(cx, |v, k, cx| v.open_picker(Purpose::RequestKind(k), cx)),
+            OpenIssueRight => |this: &mut Self, _w, cx: &mut Context<Self>| {
+                let from_list = this.model.read(cx).focus == PaneFocus::Issues;
+                if let Some(k) = this.model.read(cx).current_key() { this.open_issue_at(&k, Edge::Right, cx) }
+                this.advance_after_open(from_list, cx);
+            },
+            OpenIssueBelow => |this: &mut Self, _w, cx: &mut Context<Self>| {
+                let from_list = this.model.read(cx).focus == PaneFocus::Issues;
+                if let Some(k) = this.model.read(cx).current_key() { this.open_issue_at(&k, Edge::Bottom, cx) }
+                this.advance_after_open(from_list, cx);
+            },
+            ChooseShownSprints => |this: &mut Self, _w, cx: &mut Context<Self>| this.open_picker(Purpose::SprintsShown, cx),
+            HideSprintRow => |this: &mut Self, _w, cx: &mut Context<Self>| this.model.update(cx, |m, cx| {
+                let row = m.filter_rows().get(m.filter_cursor).cloned();
+                match row {
+                    Some(state::FilterRow::Sprint { sel: jdesk_core::filter::SprintSel::Id(id), label, .. }) => {
+                        m.show_sprint_in_filters(id, false);
+                        m.note(format!("{label} hidden from Filters (“Choose which sprints show…” in the palette brings it back)"));
+                        let n = m.filter_rows().len();
+                        m.filter_cursor = m.filter_cursor.min(n.saturating_sub(1));
+                    }
+                    _ => m.note("h hides a sprint row from Filters; “Choose which sprints show…” picks them all"),
+                }
+                cx.notify();
+            }),
+            LinkIssue => |this: &mut Self, _w, cx: &mut Context<Self>| this.with_issue(cx, |v, k, cx| v.open_picker(Purpose::LinkHow(k), cx)),
+            SetParent => |this: &mut Self, _w, cx: &mut Context<Self>| this.with_issue(cx, |v, k, cx| v.open_picker(Purpose::Parent(k), cx)),
+            CopyRequestForAgent => |this: &mut Self, _w, cx: &mut Context<Self>| {
+                let Some(k) = this.model.read(cx).current_key() else { return };
+                let newest = this.model.read(cx).desk.requests.for_issue(&k).filter(|r| r.state.is_open()).map(|r| r.id).max();
+                match newest {
+                    Some(id) => crate::panes::request_act(&this.model, id, "copy", cx),
+                    None => this.model.update(cx, |m, cx| { m.note(format!("No open request on {k}: ⇧R adds one")); cx.notify(); }),
+                }
+            },
             ClearFilters => |this: &mut Self, _w, cx: &mut Context<Self>| this.model.update(cx, |m, cx| { m.filter.clear(); m.refilter(); m.note("Filters cleared (the sprint stays)"); cx.notify(); }),
             Transition => |this: &mut Self, _w, cx: &mut Context<Self>| this.with_issue(cx, |v, k, cx| v.open_picker(Purpose::Transition(k), cx)),
             Assign => |this: &mut Self, _w, cx: &mut Context<Self>| this.with_issue(cx, |v, k, cx| v.open_picker(Purpose::Assign(k), cx)),
@@ -3164,13 +3816,17 @@ impl Render for DeskView {
             })),
             ToggleStar => |this: &mut Self, _w, cx: &mut Context<Self>| this.with_issue(cx, |v, k, cx| v.model.update(cx, |m, cx| {
                 match m.desk.toggle_star(&k) {
-                    Ok(on) => { m.rebuild(); m.note(if on { format!("Starred {k}") } else { format!("Unstarred {k}") }); }
+                    Ok(on) => { m.rebuild_after_change(&k, true); m.note(if on { format!("Starred {k}") } else { format!("Unstarred {k}") }); }
                     Err(e) => m.error(e.to_string()),
                 }
                 cx.notify();
             })),
             EditNote => |this: &mut Self, _w, cx: &mut Context<Self>| this.with_issue(cx, |v, _k, cx| v.edit_note(cx)),
-            OpenIssueTab => |this: &mut Self, _w, cx: &mut Context<Self>| this.with_issue(cx, |v, k, cx| v.open_issue_tab(&k, cx)),
+            OpenIssueTab => |this: &mut Self, _w, cx: &mut Context<Self>| {
+                let from_list = this.model.read(cx).focus == PaneFocus::Issues;
+                this.with_issue(cx, |v, k, cx| v.open_issue_tab(&k, cx));
+                this.advance_after_open(from_list, cx);
+            },
             OpenInBrowser => |this: &mut Self, _w, cx: &mut Context<Self>| this.with_issue(cx, |v, k, cx| {
                 let url = v.model.read(cx).desk.browse_url(&k);
                 cx.open_url(&url);
@@ -3258,7 +3914,7 @@ impl Render for DeskView {
             .on_action(cx.listener(Self::input_confirm))
             .on_action(cx.listener(Self::input_confirm_alt))
             // From the layout shell: Tab in Bring from tray…, or New Focus Page with an empty
-            // tray. Issues take the place of Odin's files.
+            // tray. Issues take the place of Chorong's files.
             .on_action(
                 cx.listener(|this, _: &cho_layout_ui::actions::AddFileToPage, _, cx| {
                     this.overlay = None;

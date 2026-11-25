@@ -63,6 +63,8 @@ max_image_mb = 500                            # optional: the most images may ta
 - `max_image_mb` (optional, 500 if left out): the downloaded images of issues you open are
   kept up to this size; past it, those you opened least recently are deleted and download
   again if you open them. 0 means no limit.
+- `[[status_group]]` (optional): your own status chips over the List (which statuses go
+  together, and in what order). See "Status chips" in the README.
 
 ## 3. Put the token in the Keychain
 

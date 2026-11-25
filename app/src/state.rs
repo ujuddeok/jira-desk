@@ -23,6 +23,49 @@ pub const OLD_PREVIEW: &str = "Issue";
 pub const NOTES: &str = "Notes";
 pub const BOARD: &str = "Board";
 pub const SETTINGS: &str = "Settings";
+/// The sprints from `anchor` to `id` inclusive, either way round, in `order` (the Filters
+/// pane's); `None` if either isn't there.
+pub fn sprint_range(
+    order: &[u64],
+    anchor: u64,
+    id: u64,
+) -> Option<std::collections::BTreeSet<u64>> {
+    let a = order.iter().position(|x| *x == anchor)?;
+    let b = order.iter().position(|x| *x == id)?;
+    Some(order[a.min(b)..=a.max(b)].iter().copied().collect())
+}
+
+/// Choices made in the app's Settings, kept in `prefs.json` in the data folder. Each is
+/// `None` until you choose, so config.toml's value stands until then.
+#[derive(Clone, Debug, Default, PartialEq, serde::Serialize, serde::Deserialize)]
+pub struct Prefs {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub auto_advance: Option<bool>,
+    /// Sprints you chose to show or hide in the Filters pane, by id (the rest follow the
+    /// usual rule: open sprints, and the two most recent closed ones).
+    #[serde(default, skip_serializing_if = "std::collections::BTreeMap::is_empty")]
+    pub sprints_shown: std::collections::BTreeMap<u64, bool>,
+}
+
+impl Prefs {
+    fn path(dir: &std::path::Path) -> std::path::PathBuf {
+        dir.join("prefs.json")
+    }
+
+    /// The saved choices; none when the file is missing or unreadable.
+    pub fn load(dir: &std::path::Path) -> Self {
+        std::fs::read_to_string(Self::path(dir))
+            .ok()
+            .and_then(|t| serde_json::from_str(&t).ok())
+            .unwrap_or_default()
+    }
+
+    pub fn save(&self, dir: &std::path::Path) -> std::io::Result<()> {
+        let json = serde_json::to_string_pretty(self).map_err(std::io::Error::other)?;
+        jdesk_core::write_atomic(&Self::path(dir), json.as_bytes()).map_err(std::io::Error::other)
+    }
+}
+
 /// A story-point total as shown beside counts: `42 pts`, `12.5 pts`; nothing for none.
 pub fn points_total(p: f64) -> String {
     if p <= 0. {
@@ -152,6 +195,7 @@ pub enum Quick {
     Noted,
     Pending,
     Review,
+    Requests,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -210,11 +254,27 @@ pub struct Model {
     pub selected: Option<String>,
     pub list_scroll: UniformListScrollHandle,
     pub filter_cursor: usize,
+    /// The sprint last clicked or toggled in Filters: where a Shift range starts.
+    pub sprint_anchor: Option<u64>,
     pub changes_cursor: usize,
     /// Board: (column, row).
     pub board_cursor: (usize, usize),
     /// The board's sideways scroll, to keep the current column in view.
     pub board_scroll: gpui::ScrollHandle,
+    /// Each scrolling area's stretch at its ends, by name.
+    pub scroll_areas: crate::scroll::ScrollAreas,
+    /// After a change made from the List, go to the next issue (`auto_advance`; ⌘⇧P can
+    /// flip it for this session).
+    pub auto_advance: bool,
+    /// The issue the Notes pane shows: the current one while an issue pane has focus, kept as
+    /// it was while Notes (or Filters, Settings) does, so clicking in Notes stays on it.
+    pub notes_for: Option<String>,
+    /// Sprints shown or hidden in the Filters pane by your choice (prefs.json).
+    pub sprints_shown: std::collections::BTreeMap<u64, bool>,
+    /// Each issue pane's selectable text, as last drawn, by pane.
+    pub text_maps: std::cell::RefCell<HashMap<String, crate::select::TextMap>>,
+    /// The text selected in each issue pane.
+    pub text_sel: std::cell::RefCell<HashMap<String, crate::select::TextSel>>,
     pub focus: PaneFocus,
     pub sync: SyncState,
     pub notice: Option<Notice>,
@@ -236,9 +296,55 @@ pub struct Model {
     pub pending_more: Option<MoreOf>,
     /// A board card was clicked: show the Preview pane beside the board.
     pub pending_preview: bool,
+    /// A request's text was clicked: show the whole request in a dialog.
+    pub pending_request: Option<u64>,
     /// Bumped on every change, so cached pane bodies know to redraw.
     pub generation: u64,
     key_index: HashMap<String, usize>,
+}
+
+/// The key that applies the queue, as the keymap has it on this platform ("⌘⇧A" on a Mac,
+/// "Ctrl-Shift-A" elsewhere, or your own), for hints written into the panes. Set when the
+/// window opens.
+static APPLY_KEY: std::sync::OnceLock<String> = std::sync::OnceLock::new();
+
+pub fn set_apply_key(label: String) {
+    let _ = APPLY_KEY.set(label);
+}
+
+pub fn apply_key() -> &'static str {
+    APPLY_KEY
+        .get()
+        .map(String::as_str)
+        .unwrap_or(if cfg!(target_os = "macos") {
+            "⌘⇧A"
+        } else {
+            "Ctrl-Shift-A"
+        })
+}
+
+/// The status chips' names for the palette and help ("Status chip: In review"), made once:
+/// config.toml is read at start-up, so they don't change while the app runs.
+static CHIP_LABELS: std::sync::OnceLock<Vec<&'static str>> = std::sync::OnceLock::new();
+
+fn set_chip_labels(defs: &[jdesk_core::config::StatusGroup]) {
+    let _ = CHIP_LABELS.set(
+        defs.iter()
+            .take(9)
+            .map(|g| &*Box::leak(format!("Status chip: {}", g.name).into_boxed_str()))
+            .collect(),
+    );
+}
+
+/// See [`CHIP_LABELS`]; the defaults until a window opens.
+pub fn chip_labels() -> Vec<&'static str> {
+    CHIP_LABELS.get().cloned().unwrap_or_else(|| {
+        vec![
+            "Status chip: Not started",
+            "Status chip: In progress · review",
+            "Status chip: Done",
+        ]
+    })
 }
 
 impl Model {
@@ -248,6 +354,13 @@ impl Model {
             .and_then(|t| serde_json::from_str(&t).ok());
         let restored = saved.is_some();
         let mut filter = saved.unwrap_or_default();
+        // The chips come from config.toml; a choice saved under a name that's gone is dropped.
+        filter.group_defs = desk.status_groups.clone();
+        set_chip_labels(&filter.group_defs);
+        let known: Vec<String> = filter.group_defs.iter().map(|g| g.name.clone()).collect();
+        filter
+            .groups
+            .retain(|g| known.contains(g) || g == jdesk_core::filter::OTHER);
         // Kanban sites have no sprints: show everything rather than an empty list.
         if !restored
             && !desk
@@ -258,6 +371,11 @@ impl Model {
         {
             filter.sprint = SprintSel::All;
         }
+        let sprints_shown = Prefs::load(&desk.dir).sprints_shown;
+        // Your choice in Settings (prefs.json) wins over `auto_advance` in config.toml.
+        let auto_advance = Prefs::load(&desk.dir)
+            .auto_advance
+            .unwrap_or(desk.auto_advance);
         let mut m = Self {
             desk,
             images: HashMap::new(),
@@ -271,9 +389,16 @@ impl Model {
             selected: None,
             list_scroll: UniformListScrollHandle::new(),
             filter_cursor: 1,
+            sprint_anchor: None,
             changes_cursor: 0,
             board_cursor: (0, 0),
             board_scroll: gpui::ScrollHandle::new(),
+            scroll_areas: Default::default(),
+            auto_advance,
+            notes_for: None,
+            sprints_shown,
+            text_maps: Default::default(),
+            text_sel: Default::default(),
             focus: PaneFocus::Issues,
             sync: SyncState::default(),
             notice: None,
@@ -286,6 +411,7 @@ impl Model {
             series: Vec::new(),
             pending_open: None,
             pending_preview: false,
+            pending_request: None,
             pending_more: None,
             generation: 0,
             key_index: HashMap::new(),
@@ -313,6 +439,36 @@ impl Model {
             .map(|(n, i)| (i.key.clone(), n))
             .collect();
         self.refilter();
+    }
+
+    /// Drops the selectable text and selection `pane` kept for other issues than `area`.
+    pub fn forget_text_except(&self, pane: &str, area: &str) {
+        let prefix = format!("{pane}|");
+        self.text_maps
+            .borrow_mut()
+            .retain(|k, _| !k.starts_with(&prefix) || k == area);
+        self.text_sel
+            .borrow_mut()
+            .retain(|k, _| !k.starts_with(&prefix) || k == area);
+    }
+
+    /// The text selected in `area`, if any.
+    pub fn sel(&self, area: &str) -> Option<crate::select::TextSel> {
+        self.text_sel.borrow().get(area).copied()
+    }
+
+    /// The selectable text of the pane called `pane` (see [`crate::select`]).
+    pub fn text_map(&self, pane: &str) -> crate::select::TextMap {
+        self.text_maps
+            .borrow_mut()
+            .entry(pane.to_string())
+            .or_default()
+            .clone()
+    }
+
+    /// Whether scrolling areas stretch at their ends.
+    pub fn stretch(&self) -> crate::overscroll::Stretch {
+        self.desk.overscroll().into()
     }
 
     /// Recomputes the list and counts after the filter changed.
@@ -404,7 +560,20 @@ impl Model {
                     .or_else(|| self.selected.clone()),
                 None => self.selected.clone(),
             },
+            // Notes stays on the issue it was showing (`follow_for_notes`).
+            PaneFocus::Notes => self.notes_for.clone().or_else(|| self.selected.clone()),
             _ => self.selected.clone(),
+        }
+    }
+
+    /// Keeps `notes_for` on the current issue while a pane that has one is focused (an issue
+    /// tab, Preview, the List, the Board, Changes); elsewhere it stays as it was.
+    pub fn follow_for_notes(&mut self) {
+        if !matches!(
+            self.focus,
+            PaneFocus::Notes | PaneFocus::Filters | PaneFocus::Settings | PaneFocus::Other
+        ) {
+            self.notes_for = self.current_key();
         }
     }
 
@@ -444,7 +613,10 @@ impl Model {
         let fx = &self.facets;
         let mut rows = vec![FilterRow::Header("Sprint")];
         let mut sprint = |sel: SprintSel, label: String, detail: String, count: usize| {
-            let on = f.sprint == sel;
+            let on = match &sel {
+                SprintSel::Id(id) => f.sprint.has(*id),
+                other => f.sprint == *other,
+            };
             rows.push(FilterRow::Sprint {
                 sel,
                 label,
@@ -460,16 +632,10 @@ impl Model {
             fx.active,
         );
         let sprints = self.desk.sprints();
-        let mut closed_shown = 0;
+        let shown = self.sprints_in_filters();
         for s in &sprints {
-            let show = match s.state {
-                SprintState::Closed => {
-                    closed_shown += 1;
-                    closed_shown <= 2 || f.sprint == SprintSel::Id(s.id)
-                }
-                _ => true,
-            };
-            if show {
+            // A sprint the list is showing stays, even if you hid it.
+            if shown.contains(&s.id) || f.sprint.has(s.id) {
                 let count = fx.sprints.get(&s.id).map_or(0, |(_, n)| *n);
                 let state = match s.state {
                     SprintState::Active => "active",
@@ -497,13 +663,7 @@ impl Model {
             points_total(fx.all_points),
             fx.all,
         );
-        if sprints.len()
-            > closed_shown.min(2)
-                + sprints
-                    .iter()
-                    .filter(|s| s.state != SprintState::Closed)
-                    .count()
-        {
+        if sprints.len() > shown.len() {
             rows.push(FilterRow::More("More sprints…", MoreOf::Sprints));
         }
 
@@ -518,6 +678,7 @@ impl Model {
             (Quick::Starred, "Starred", f.starred),
             (Quick::Noted, "With notes", f.noted),
             (Quick::Pending, "With queued changes", f.pending),
+            (Quick::Requests, "With open requests", f.requests),
         ] {
             rows.push(FilterRow::Quick { which, label, on });
         }
@@ -621,8 +782,95 @@ impl Model {
         rows
     }
 
-    /// Applies a Filters row (Enter or Space on it, or a click).
+    /// The sprints the Filters pane lists: your choice for each (Choose which sprints show…,
+    /// or h on a row), else open sprints and the two most recent closed ones.
+    pub fn sprints_in_filters(&self) -> std::collections::BTreeSet<u64> {
+        let mut closed = 0;
+        self.desk
+            .sprints()
+            .iter()
+            .filter(|s| {
+                let usual = if s.state == SprintState::Closed {
+                    closed += 1;
+                    closed <= 2
+                } else {
+                    true
+                };
+                self.sprints_shown.get(&s.id).copied().unwrap_or(usual)
+            })
+            .map(|s| s.id)
+            .collect()
+    }
+
+    /// Shows or hides a sprint in the Filters pane, and remembers it.
+    pub fn show_sprint_in_filters(&mut self, id: u64, on: bool) {
+        self.sprints_shown.insert(id, on);
+        let mut prefs = Prefs::load(&self.desk.dir);
+        prefs.sprints_shown = self.sprints_shown.clone();
+        if let Err(e) = prefs.save(&self.desk.dir) {
+            self.error(format!("Not saved: {e}"));
+        }
+        self.generation += 1;
+    }
+
+    /// Space or ⌘-click on a Filters row: a sprint is added to those shown (or taken out);
+    /// any other row toggles as with Enter.
+    pub fn add_filter_row(&mut self, row: &FilterRow) {
+        if let FilterRow::Sprint {
+            sel: SprintSel::Id(id),
+            ..
+        } = row
+        {
+            self.filter.sprint = self.filter.sprint.toggled(*id);
+            self.sprint_anchor = Some(*id);
+            self.refilter();
+        } else {
+            self.toggle_filter_row(row);
+        }
+    }
+
+    /// ⇧-click or ⇧Space on a sprint row: the sprints from the last one clicked (or toggled)
+    /// to this one, in the Filters pane's order, become those shown. With no earlier sprint, or
+    /// on another row, as a plain click.
+    pub fn range_filter_row(&mut self, row: &FilterRow) {
+        let (
+            FilterRow::Sprint {
+                sel: SprintSel::Id(id),
+                ..
+            },
+            Some(anchor),
+        ) = (row, self.sprint_anchor)
+        else {
+            return self.toggle_filter_row(row);
+        };
+        let order: Vec<u64> = self
+            .filter_rows()
+            .iter()
+            .filter_map(|r| match r {
+                FilterRow::Sprint {
+                    sel: SprintSel::Id(x),
+                    ..
+                } => Some(*x),
+                _ => None,
+            })
+            .collect();
+        let Some(ids) = sprint_range(&order, anchor, *id) else {
+            return self.toggle_filter_row(row);
+        };
+        self.filter.sprint = SprintSel::from_ids(ids);
+        // The anchor stays, so another ⇧-click moves the range's far end.
+        self.refilter();
+    }
+
+    /// Applies a Filters row (Enter on it, or a click). A sprint row shows only that sprint.
     pub fn toggle_filter_row(&mut self, row: &FilterRow) {
+        if let FilterRow::Sprint {
+            sel: SprintSel::Id(id),
+            ..
+        } = row
+        {
+            self.sprint_anchor = Some(*id);
+        }
         let f = &mut self.filter;
         match row {
             FilterRow::Header(_) | FilterRow::More(..) => return,
@@ -635,6 +883,53 @@ impl Model {
             FilterRow::Status { name, .. } => toggle(&mut f.statuses, name),
         }
         self.refilter();
+    }
+
+    /// A status chip on or off (they combine: in progress or done).
+    pub fn toggle_group(&mut self, name: &str) {
+        if !self.filter.groups.remove(name) {
+            self.filter.groups.insert(name.to_string());
+        }
+        self.refilter();
+    }
+
+    /// The status chips, in order: the groups from config.toml, then Other when some issues
+    /// fall in no group (or it's chosen).
+    pub fn chip_names(&self) -> Vec<String> {
+        let mut out: Vec<String> = self
+            .filter
+            .group_defs
+            .iter()
+            .map(|g| g.name.clone())
+            .collect();
+        let other = jdesk_core::filter::OTHER;
+        if self.facets.groups.get(other).copied().unwrap_or(0) > 0
+            || self.filter.groups.contains(other)
+        {
+            out.push(other.to_string());
+        }
+        out
+    }
+
+    /// The Jira category a chip mostly holds, for its colour: its own `category`, else that of
+    /// its first status Jira knows.
+    pub fn chip_category(&self, name: &str) -> jdesk_core::model::StatusCategory {
+        let Some(g) = self.filter.group_defs.iter().find(|g| g.name == name) else {
+            return jdesk_core::model::StatusCategory::ToDo;
+        };
+        if let Some(c) = g.category {
+            return c;
+        }
+        let known = self.desk.statuses();
+        g.statuses
+            .iter()
+            .find_map(|s| {
+                known
+                    .iter()
+                    .find(|(n, _)| n.eq_ignore_ascii_case(s))
+                    .map(|(_, c)| *c)
+            })
+            .unwrap_or_default()
     }
 
     pub fn toggle_quick(&mut self, which: Quick) {
@@ -655,6 +950,7 @@ impl Model {
             Quick::Noted => f.noted = !f.noted,
             Quick::Pending => f.pending = !f.pending,
             Quick::Review => f.review = !f.review,
+            Quick::Requests => f.requests = !f.requests,
         }
     }
 
@@ -665,12 +961,19 @@ impl Model {
             SprintSel::Active => "Active sprint".to_string(),
             SprintSel::Backlog => "Backlog".into(),
             SprintSel::All => "All issues".into(),
-            SprintSel::Id(id) => self
-                .desk
-                .sprints()
-                .into_iter()
-                .find(|s| s.id == *id)
-                .map_or(format!("Sprint {id}"), |s| s.name),
+            SprintSel::Id(_) | SprintSel::Ids(_) => {
+                let all = self.desk.sprints();
+                f.sprint
+                    .ids()
+                    .iter()
+                    .map(|id| {
+                        all.iter()
+                            .find(|s| s.id == *id)
+                            .map_or(format!("Sprint {id}"), |s| s.name.clone())
+                    })
+                    .collect::<Vec<_>>()
+                    .join(" + ")
+            }
         }];
         let names = |ids: &std::collections::BTreeSet<String>, f: &dyn Fn(&str) -> String| {
             ids.iter().map(|i| f(i)).collect::<Vec<_>>().join(" or ")
@@ -704,12 +1007,24 @@ impl Model {
         if !f.tags.is_empty() {
             parts.push(names(&f.tags, &|t| format!("#{t}")));
         }
+        if !f.groups.is_empty() {
+            // In chip order, as the chips read.
+            let chosen: Vec<String> = self
+                .chip_names()
+                .into_iter()
+                .filter(|n| f.groups.contains(n))
+                .map(|n| n.replace(" · ", " or ").to_lowercase())
+                .collect();
+            parts.push(chosen.join(" or "));
+        }
         for (on, w) in [
-            (f.hide_done, "not done"),
+            // A chosen chip outranks Hide done for its own issues.
+            (f.hide_done && f.groups.is_empty(), "not done"),
             (f.starred, "starred"),
             (f.noted, "noted"),
             (f.pending, "queued"),
             (f.review, "to review"),
+            (f.requests, "with requests"),
         ] {
             if on {
                 parts.push(w.into());
@@ -786,6 +1101,31 @@ impl Model {
     // ----- changes --------------------------------------------------------------------------
 
     /// Queues a change to `key`, with a status-bar note.
+    /// Rebuilds after a change to `key` without losing your place in the List: if the issue
+    /// no longer fits the filter, the one that took its row is selected (not the first row);
+    /// with `advance` and auto-advance on, the next issue is. Only when the List has focus and
+    /// `key` is its selection: a change made from a tab or the Board leaves the List alone.
+    pub fn rebuild_after_change(&mut self, key: &str, advance: bool) {
+        let ours = self.focus == PaneFocus::Issues && self.selected.as_deref() == Some(key);
+        let row = self.selected_row();
+        self.rebuild();
+        let (true, Some(row)) = (ours, row) else {
+            return;
+        };
+        let last = self.visible.len().saturating_sub(1);
+        match self.selected_row() {
+            // Still listed (refilter keeps the selection when it can).
+            Some(now) if self.selected.as_deref() == Some(key) => {
+                if advance && self.auto_advance {
+                    self.select_row((now + 1).min(last));
+                }
+            }
+            // It left the list: the issue now in its row.
+            _ if !self.visible.is_empty() => self.select_row(row.min(last)),
+            _ => {}
+        }
+    }
+
     pub fn queue(&mut self, key: &str, edit: Edit) {
         if self.sync.applying {
             self.error("Wait for the changes being applied to finish");
@@ -795,10 +1135,11 @@ impl Model {
         match self.desk.queue_edit(key, edit) {
             Ok(true) => {
                 let n = self.desk.queue.pending_count();
-                self.rebuild();
+                self.rebuild_after_change(key, true);
                 self.note(format!(
-                    "Queued {key}: {what} · {n} change{} to apply (⌘⇧A)",
-                    if n == 1 { "" } else { "s" }
+                    "Queued {key}: {what} · {n} change{} to apply ({})",
+                    if n == 1 { "" } else { "s" },
+                    apply_key()
                 ));
             }
             Ok(false) => self.note(format!("{key}: no change")),
@@ -1165,6 +1506,15 @@ impl Model {
                     self.filter.sprint = SprintSel::All;
                 }
                 self.rebuild();
+                // What sync found about requests: seen in Jira, or changed and waiting for you.
+                let news = std::mem::take(&mut self.desk.request_news);
+                if !news.is_empty() {
+                    self.note(if news.len() == 1 {
+                        news[0].clone()
+                    } else {
+                        format!("{} requests moved: {}", news.len(), news.join(" · "))
+                    });
+                }
                 if !new_reviews.is_empty() {
                     self.error(format!(
                         "{} changed a lot in Jira: your changes to {} are held until you review (v)",
@@ -1270,7 +1620,9 @@ impl Model {
                 }
                 let held = r.held.len();
                 let raised: Vec<String> = r.raised.iter().map(|(i, _)| i.key.clone()).collect();
-                if let Err(e) = self.desk.store_refreshed(r.refreshed) {
+                let mut read = r.refreshed;
+                read.extend(r.also_read);
+                if let Err(e) = self.desk.store_refreshed(read) {
                     self.error(format!("Applied, but the cache could not be updated: {e}"));
                 }
                 let mut parts = vec![format!("{} applied", r.applied)];
@@ -1380,5 +1732,64 @@ mod points_tests {
         assert_eq!(points_total(0.), "");
         assert_eq!(points_total(42.), "42 pts");
         assert_eq!(points_total(12.5), "12.5 pts");
+    }
+}
+
+#[cfg(test)]
+mod prefs_tests {
+    use super::Prefs;
+
+    #[test]
+    fn a_choice_is_saved_and_read_back() {
+        let d = tempfile::tempdir().unwrap();
+        assert_eq!(
+            Prefs::load(d.path()).auto_advance,
+            None,
+            "unset until chosen"
+        );
+        let p = Prefs {
+            auto_advance: Some(true),
+            ..Default::default()
+        };
+        p.save(d.path()).unwrap();
+        assert_eq!(Prefs::load(d.path()).auto_advance, Some(true));
+        let mut p = Prefs::load(d.path());
+        p.sprints_shown.insert(41, true);
+        p.sprints_shown.insert(45, false);
+        p.save(d.path()).unwrap();
+        let back = Prefs::load(d.path());
+        assert_eq!(back.sprints_shown.get(&41), Some(&true));
+        assert_eq!(back.sprints_shown.get(&45), Some(&false));
+        assert_eq!(
+            back.auto_advance,
+            Some(true),
+            "one choice doesn't drop another"
+        );
+        std::fs::write(d.path().join("prefs.json"), "not json").unwrap();
+        assert_eq!(
+            Prefs::load(d.path()),
+            Prefs::default(),
+            "a broken file is ignored"
+        );
+    }
+}
+
+#[cfg(test)]
+mod sprint_range_tests {
+    use super::sprint_range;
+
+    #[test]
+    fn a_range_runs_either_way_in_pane_order() {
+        // Pane order: active, then future by date, then closed.
+        let order = [43, 44, 45, 42, 41];
+        assert_eq!(sprint_range(&order, 43, 45), Some([43, 44, 45].into()));
+        assert_eq!(sprint_range(&order, 45, 43), Some([43, 44, 45].into()));
+        assert_eq!(sprint_range(&order, 44, 44), Some([44].into()));
+        assert_eq!(sprint_range(&order, 44, 41), Some([44, 45, 42, 41].into()));
+        assert_eq!(
+            sprint_range(&order, 99, 44),
+            None,
+            "an anchor no longer shown"
+        );
     }
 }

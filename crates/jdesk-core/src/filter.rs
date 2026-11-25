@@ -16,7 +16,49 @@ pub enum SprintSel {
     /// Not in an active or future sprint.
     Backlog,
     Id(u64),
+    /// Issues in any of these sprints (two or more: one is `Id`).
+    Ids(BTreeSet<u64>),
     All,
+}
+
+impl SprintSel {
+    /// Whether this sprint is one of those chosen.
+    pub fn has(&self, id: u64) -> bool {
+        match self {
+            SprintSel::Id(x) => *x == id,
+            SprintSel::Ids(s) => s.contains(&id),
+            _ => false,
+        }
+    }
+
+    /// The sprints chosen by id (none for Active, Backlog and All).
+    pub fn ids(&self) -> Vec<u64> {
+        match self {
+            SprintSel::Id(x) => vec![*x],
+            SprintSel::Ids(s) => s.iter().copied().collect(),
+            _ => Vec::new(),
+        }
+    }
+
+    /// `id` added to the sprints chosen, or taken out if it was one. Active, Backlog and All
+    /// are choices of their own: adding a sprint to one of them starts afresh with that sprint.
+    /// Taking out the last leaves the active sprint.
+    pub fn toggled(&self, id: u64) -> SprintSel {
+        let mut set: BTreeSet<u64> = self.ids().into_iter().collect();
+        if !set.remove(&id) {
+            set.insert(id);
+        }
+        SprintSel::from_ids(set)
+    }
+
+    /// One sprint as `Id`, several as `Ids`, none as `Active`.
+    pub fn from_ids(set: BTreeSet<u64>) -> SprintSel {
+        match set.len() {
+            0 => SprintSel::Active,
+            1 => SprintSel::Id(*set.iter().next().expect("one")),
+            _ => SprintSel::Ids(set),
+        }
+    }
 }
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -60,6 +102,8 @@ pub struct Flags {
     /// The issue changed a lot in Jira since you attached things to it (see
     /// [`crate::identity`]); its queued changes wait for your review.
     pub review: bool,
+    /// Open requests (made outside Jira Desk) on it.
+    pub requests: bool,
 }
 
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
@@ -71,6 +115,13 @@ pub struct Filter {
     /// Parent keys; `""` is No epic.
     pub epics: BTreeSet<String>,
     pub statuses: BTreeSet<String>,
+    /// The status chips chosen, by name (see [`crate::config::StatusGroup`]); [`OTHER`] is the
+    /// statuses no group takes.
+    #[serde(default)]
+    pub groups: BTreeSet<String>,
+    /// The chips' definitions (from config.toml; not saved with the filter).
+    #[serde(skip)]
+    pub group_defs: Vec<crate::config::StatusGroup>,
     pub hide_done: bool,
     pub starred: bool,
     pub noted: bool,
@@ -81,8 +132,29 @@ pub struct Filter {
     /// Only issues waiting for a review (changed a lot in Jira).
     #[serde(default)]
     pub review: bool,
+    /// Only issues with open requests.
+    #[serde(default)]
+    pub requests: bool,
     pub text: String,
     pub sort: Sort,
+}
+
+/// The chip for statuses no group takes.
+pub const OTHER: &str = "Other";
+
+/// See [`Filter::group_of`]. With no groups (a filter made in code), Jira's categories.
+pub fn group_of<'a>(defs: &'a [crate::config::StatusGroup], i: &Issue) -> &'a str {
+    if defs.is_empty() {
+        return match i.status_category {
+            StatusCategory::ToDo => "Not started",
+            StatusCategory::InProgress => "In progress · review",
+            StatusCategory::Done => "Done",
+        };
+    }
+    defs.iter()
+        .find(|g| g.statuses.iter().any(|s| s.eq_ignore_ascii_case(&i.status)))
+        .or_else(|| defs.iter().find(|g| g.category == Some(i.status_category)))
+        .map_or(OTHER, |g| g.name.as_str())
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -92,6 +164,7 @@ enum Dim {
     Label,
     Epic,
     Status,
+    Group,
     Tag,
 }
 
@@ -102,12 +175,14 @@ impl Filter {
             || !self.labels.is_empty()
             || !self.epics.is_empty()
             || !self.statuses.is_empty()
+            || !self.groups.is_empty()
             || self.hide_done
             || self.starred
             || self.noted
             || self.pending
             || !self.tags.is_empty()
             || self.review
+            || self.requests
             || !self.text.trim().is_empty()
     }
 
@@ -116,8 +191,15 @@ impl Filter {
         *self = Filter {
             sprint: self.sprint.clone(),
             sort: self.sort,
+            group_defs: std::mem::take(&mut self.group_defs),
             ..Default::default()
         };
+    }
+
+    /// The status chip `i` falls in: the first group naming its status, else the first taking
+    /// its category, else [`OTHER`].
+    pub fn group_of<'a>(&'a self, i: &Issue) -> &'a str {
+        group_of(&self.group_defs, i)
     }
 
     fn sprint_ok(&self, i: &Issue) -> bool {
@@ -126,6 +208,7 @@ impl Filter {
             SprintSel::Active => i.sprints.iter().any(|s| s.state == SprintState::Active),
             SprintSel::Backlog => !i.sprints.iter().any(|s| s.state != SprintState::Closed),
             SprintSel::Id(id) => i.sprints.iter().any(|s| s.id == *id),
+            SprintSel::Ids(ids) => i.sprints.iter().any(|s| ids.contains(&s.id)),
         }
     }
 
@@ -164,7 +247,20 @@ impl Filter {
         if want(Dim::Status) && !self.statuses.is_empty() && !self.statuses.contains(&i.status) {
             return false;
         }
-        if self.hide_done && i.status_category == StatusCategory::Done {
+        let group = (!self.groups.is_empty() || self.hide_done).then(|| self.group_of(i));
+        if want(Dim::Group)
+            && !self.groups.is_empty()
+            && !group.is_some_and(|g| self.groups.contains(g))
+        {
+            return false;
+        }
+        // Choosing a chip says you want its issues, done ones included: it outranks Hide done
+        // (also while counting the chips, so each shows how many it would bring back).
+        if self.hide_done
+            && i.status_category == StatusCategory::Done
+            && !group.is_some_and(|g| self.groups.contains(g))
+            && skip != Some(Dim::Group)
+        {
             return false;
         }
         if want(Dim::Tag) && !self.tags.is_empty() && !f.tags.iter().any(|t| self.tags.contains(t))
@@ -174,7 +270,8 @@ impl Filter {
         !((self.starred && !f.starred)
             || (self.noted && !f.noted)
             || (self.pending && !f.pending)
-            || (self.review && !f.review))
+            || (self.review && !f.review)
+            || (self.requests && !f.requests))
     }
 
     pub fn matches(&self, i: &Issue, f: &Flags) -> bool {
@@ -248,6 +345,9 @@ impl Filter {
                     *fx.tags.entry(t.clone()).or_default() += 1;
                 }
             }
+            if self.passes_but_text(i, f, Some(Dim::Group)) {
+                *fx.groups.entry(self.group_of(i).to_string()).or_default() += 1;
+            }
             if self.passes_but_text(i, f, Some(Dim::Status)) {
                 let e = fx
                     .statuses
@@ -291,6 +391,8 @@ impl Filter {
 
 #[derive(Debug, Default)]
 pub struct Facets {
+    /// Per status chip (by name), ignoring the chips' own choice.
+    pub groups: BTreeMap<String, usize>,
     pub active: usize,
     pub backlog: usize,
     pub all: usize,
@@ -383,6 +485,80 @@ pub fn sort(list: &mut [&Issue], by: Sort) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn status_chips_filter_and_count() {
+        let issues: Vec<Issue> = crate::demo::issues(120);
+        let flags = vec![Flags::default(); issues.len()];
+        let mut f = Filter {
+            sprint: SprintSel::All,
+            group_defs: crate::config::default_status_groups(),
+            ..Default::default()
+        };
+        let total = f.apply(&issues, &flags).len();
+        let fx = f.facets(&issues, &flags);
+        assert_eq!(fx.groups.values().sum::<usize>(), total);
+        f.groups.insert("In progress · review".into());
+        let shown = f.apply(&issues, &flags);
+        assert!(!shown.is_empty());
+        assert!(
+            shown
+                .iter()
+                .all(|i| i.status_category == StatusCategory::InProgress)
+        );
+        // The counts ignore the chips' own choice, so every chip still shows its number.
+        assert_eq!(f.facets(&issues, &flags).groups, fx.groups);
+        // Hide done hides done issues, unless a chosen chip holds them.
+        f.groups.clear();
+        f.hide_done = true;
+        assert!(
+            f.apply(&issues, &flags)
+                .iter()
+                .all(|i| i.status_category != StatusCategory::Done)
+        );
+        assert_eq!(
+            f.facets(&issues, &flags).groups.get("Done"),
+            fx.groups.get("Done")
+        );
+        f.groups.insert("Done".into());
+        assert_eq!(f.apply(&issues, &flags).len(), fx.groups["Done"]);
+    }
+
+    #[test]
+    fn groups_from_config_split_and_catch_the_rest() {
+        use crate::config::StatusGroup;
+        let issues: Vec<Issue> = crate::demo::issues(120);
+        let flags = vec![Flags::default(); issues.len()];
+        let g = |name: &str, statuses: &[&str], category| StatusGroup {
+            name: name.into(),
+            statuses: statuses.iter().map(|s| s.to_string()).collect(),
+            category,
+        };
+        let mut f = Filter {
+            sprint: SprintSel::All,
+            group_defs: vec![
+                g("Not started", &[], Some(StatusCategory::ToDo)),
+                g("In progress", &["in progress", "Blocked"], None),
+                g("In review", &["In Review"], None),
+            ],
+            ..Default::default()
+        };
+        let fx = f.facets(&issues, &flags);
+        let n = |s: &str| issues.iter().filter(|i| i.status == s).count();
+        assert_eq!(
+            fx.groups["In progress"],
+            n("In Progress") + n("Blocked"),
+            "names ignore case"
+        );
+        assert_eq!(fx.groups["In review"], n("In Review"));
+        assert_eq!(fx.groups[OTHER], n("Done"), "no group takes Done");
+        f.groups.insert("In review".into());
+        assert!(
+            f.apply(&issues, &flags)
+                .iter()
+                .all(|i| i.status == "In Review")
+        );
+    }
     use crate::demo;
 
     #[test]
@@ -417,6 +593,26 @@ mod tests {
 
 #[cfg(test)]
 mod perf {
+
+    #[test]
+    fn sprints_are_added_and_taken_out() {
+        let s = SprintSel::Active.toggled(44);
+        assert_eq!(s, SprintSel::Id(44), "adding to Active starts afresh");
+        let s = s.toggled(45);
+        assert_eq!(s, SprintSel::Ids([44, 45].into()));
+        assert!(s.has(44) && s.has(45) && !s.has(43));
+        assert_eq!(s.toggled(44), SprintSel::Id(45));
+        assert_eq!(
+            SprintSel::Id(45).toggled(45),
+            SprintSel::Active,
+            "none left: Active"
+        );
+        assert_eq!(SprintSel::All.toggled(7), SprintSel::Id(7));
+        // An old saved filter (one sprint) still reads.
+        let old: SprintSel = serde_json::from_str(r#"{"Id":44}"#).unwrap();
+        assert_eq!(old, SprintSel::Id(44));
+    }
+
     use super::*;
 
     /// Not a benchmark: a guard that filtering 10,000 issues stays well inside a frame.

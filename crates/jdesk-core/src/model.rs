@@ -95,6 +95,34 @@ pub struct Comment {
     pub body: Vec<Block>,
 }
 
+/// A kind of link a Jira site has: its name and how it reads each way ("blocks", "is blocked
+/// by"). In "A blocks B", A is the link's inward issue and B its outward one.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct LinkType {
+    pub name: String,
+    pub inward: String,
+    pub outward: String,
+}
+
+impl LinkType {
+    /// The four every Jira site starts with, until a sync reads the site's own.
+    pub fn standard() -> Vec<LinkType> {
+        [
+            ("Blocks", "is blocked by", "blocks"),
+            ("Relates", "relates to", "relates to"),
+            ("Duplicate", "is duplicated by", "duplicates"),
+            ("Cloners", "is cloned by", "clones"),
+        ]
+        .into_iter()
+        .map(|(n, i, o)| LinkType {
+            name: n.into(),
+            inward: i.into(),
+            outward: o.into(),
+        })
+        .collect()
+    }
+}
+
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Link {
     /// How this issue relates, read from this issue's side ("blocks", "is blocked by").

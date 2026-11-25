@@ -811,6 +811,55 @@ impl Jira for DemoJira {
         })
     }
 
+    fn link(&self, name: &str, inward: &str, outward: &str) -> Result<()> {
+        self.wait();
+        let Some(t) = crate::model::LinkType::standard()
+            .into_iter()
+            .find(|t| t.name == name)
+        else {
+            bail!("400 No issue link type with name '{name}' found.");
+        };
+        let summary_of = |key: &str| -> Result<(Value, Value)> {
+            let is = self.issues.lock().expect("issues");
+            let v = is.get(key).ok_or_else(|| {
+                anyhow!("404 Issue does not exist or you do not have permission to see it.")
+            })?;
+            Ok((
+                v["fields"]["summary"].clone(),
+                v["fields"]["status"].clone(),
+            ))
+        };
+        let (in_summary, in_status) = summary_of(inward)?;
+        let (out_summary, out_status) = summary_of(outward)?;
+        let ty = json!({"name": t.name, "inward": t.inward, "outward": t.outward});
+        // As Jira lists it: on the inward issue the other is the outward one, and back.
+        self.change(inward, |f| {
+            let mut l = f["issuelinks"].as_array().cloned().unwrap_or_default();
+            l.push(json!({"type": ty, "outwardIssue": {"key": outward, "fields": {"summary": out_summary, "status": out_status}}}));
+            f["issuelinks"] = json!(l);
+        })?;
+        self.change(outward, |f| {
+            let mut l = f["issuelinks"].as_array().cloned().unwrap_or_default();
+            l.push(json!({"type": ty, "inwardIssue": {"key": inward, "fields": {"summary": in_summary, "status": in_status}}}));
+            f["issuelinks"] = json!(l);
+        })
+    }
+
+    fn set_parent(&self, key: &str, parent: &str, _epic_link: Option<&str>) -> Result<()> {
+        self.wait();
+        let p = {
+            let is = self.issues.lock().expect("issues");
+            let v = is
+                .get(parent)
+                .ok_or_else(|| anyhow!("400 parent: Issue '{parent}' does not exist."))?;
+            if v["fields"]["issuetype"]["name"] != "Epic" {
+                bail!("400 parent: '{parent}' is not an epic, so it can't be this issue's parent.");
+            }
+            json!({"key": parent, "fields": {"summary": v["fields"]["summary"], "issuetype": v["fields"]["issuetype"]}})
+        };
+        self.change(key, |f| f["parent"] = p)
+    }
+
     fn assignable(&self, _project: &str) -> Result<Vec<Person>> {
         Ok(PEOPLE
             .iter()

@@ -35,6 +35,12 @@ pub struct Rich<'a> {
     /// Keeps element ids unique within one pane.
     prefix: String,
     next: Counter<usize>,
+    /// Selectable text (the issue pane): where pieces register, and the selection.
+    select: Option<(
+        String,
+        crate::select::TextMap,
+        Option<crate::select::TextSel>,
+    )>,
 }
 
 /// `#rrggbb` as a colour.
@@ -119,6 +125,28 @@ impl<'a> Rich<'a> {
             media,
             prefix: prefix.to_string(),
             next: Counter::new(0),
+            select: None,
+        }
+    }
+
+    /// Text drawn by this renderer can be selected, in the pane called `pane`.
+    pub fn selectable(mut self, pane: &str) -> Self {
+        self.select = Some((pane.to_string(), self.m.text_map(pane), self.m.sel(pane)));
+        self
+    }
+
+    /// The selection's background.
+    fn sel_bg(&self) -> Hsla {
+        self.c.text_accent.opacity(0.28)
+    }
+
+    /// Plain text: a selectable piece when this renderer is.
+    pub fn text(&self, text: impl Into<gpui::SharedString>) -> AnyElement {
+        match &self.select {
+            Some((_, map, sel)) => {
+                crate::select::plain(map, *sel, self.sel_bg(), text).into_any_element()
+            }
+            None => div().child(text.into()).into_any_element(),
         }
     }
 
@@ -199,20 +227,44 @@ impl<'a> Rich<'a> {
                 hl.push((start..end, h));
             }
         }
-        let styled = StyledText::new(s(text)).with_highlights(hl);
+        let shown = s(text);
+        let piece = |hl| match &self.select {
+            Some((_, map, sel)) => {
+                let i = map.next();
+                let hl = crate::select::overlay(
+                    hl,
+                    sel.and_then(|sel| sel.within(i, shown.len())),
+                    self.sel_bg(),
+                );
+                let styled = StyledText::new(shown.clone()).with_highlights(hl);
+                let layout = styled.layout().clone();
+                (map.piece(shown.clone(), styled).into_any_element(), layout)
+            }
+            None => {
+                let styled = StyledText::new(shown.clone()).with_highlights(hl);
+                let layout = styled.layout().clone();
+                (div().child(styled).into_any_element(), layout)
+            }
+        };
+        let (el, layout) = piece(hl);
         if links.is_empty() {
-            return div().child(styled).into_any_element();
+            return el;
         }
         // A plain click on the paragraph, then which character it hit: pane bodies are cached
         // views, where InteractiveText's mouse-up listener (added on a redraw after
         // mouse-down) never arrives.
-        let layout = styled.layout().clone();
         let model = self.model.clone();
+        let pane = self.select.as_ref().map(|(p, _, _)| p.clone());
         div()
             .id(self.id("text"))
-            .child(styled)
+            .child(el)
             .on_click(move |ev, _window, cx| {
-                if let Ok(ix) = layout.index_for_position(ev.position())
+                // The end of a drag that selected text isn't a click on a link.
+                let selecting = pane
+                    .as_ref()
+                    .is_some_and(|p| model.read(cx).sel(p).is_some_and(|s| !s.is_empty()));
+                if !selecting
+                    && let Ok(ix) = layout.index_for_position(ev.position())
                     && let Some((_, url)) = links.iter().find(|(r, _)| r.contains(&ix))
                 {
                     follow(&model, url, cx);
@@ -277,7 +329,7 @@ impl<'a> Rich<'a> {
                 .font_family(c.mono_font.clone())
                 .text_size(px(12.))
                 .line_height(px(17.))
-                .child(s(text.clone()))
+                .child(self.text(text.clone()))
                 .when_some(
                     lang.clone().filter(|l| !l.is_empty() && l != "text"),
                     |d, l| {

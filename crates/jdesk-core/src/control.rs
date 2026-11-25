@@ -33,8 +33,11 @@ pub enum Request {
         #[serde(default)]
         text: Option<String>,
     },
-    /// Story points per sprint (and the backlog), over the issues these filters keep.
+    /// Story points per sprint (and the backlog), over the issues these filters keep. With
+    /// `sprint` (one or several), only those, and a "Together" total counting each issue once.
     Sprints {
+        #[serde(default)]
+        sprint: Option<String>,
         #[serde(default)]
         assignee: Option<String>,
         #[serde(default)]
@@ -57,6 +60,32 @@ pub enum Request {
         field: String,
         value: Vec<String>,
     },
+    /// Requests (things to make true of issues outside Jira Desk): the open ones, or `all`,
+    /// on one issue or every issue.
+    Requests {
+        #[serde(default)]
+        key: Option<String>,
+        #[serde(default)]
+        all: bool,
+    },
+    /// A new request: `kind` is description, parent, link, fix-version or other; `value` as
+    /// `jdesk request add` takes it ("blocks ABC-9", "+2.3", your words).
+    RequestAdd {
+        key: String,
+        kind: String,
+        value: String,
+    },
+    /// Moves a request on: `state` is handed, done, open or drop; `by` who (default: you).
+    RequestSet {
+        id: u64,
+        state: String,
+        #[serde(default)]
+        note: Option<String>,
+        #[serde(default)]
+        by: Option<String>,
+    },
+    /// The text to give an agent for one request: what's asked and how to fetch and report.
+    RequestPrompt { id: u64 },
     /// Star or unstar (`on: None` toggles).
     Star {
         key: String,
@@ -122,6 +151,8 @@ impl Request {
         matches!(
             self,
             Request::Change { .. }
+                | Request::RequestAdd { .. }
+                | Request::RequestSet { .. }
                 | Request::Star { .. }
                 | Request::Tag { .. }
                 | Request::Note { text: Some(_), .. }
@@ -254,11 +285,16 @@ pub fn data(desk: &mut Desk, req: &Request) -> Result<Response> {
             )
         }
         Request::Sprints {
+            sprint,
             assignee,
             label,
             tag,
             text,
         } => {
+            let chosen = sprint
+                .as_deref()
+                .map(|s| parse_sprint_sel(desk, s))
+                .transpose()?;
             let mut f = filter_for(desk, assignee, label, tag, text)?;
             f.sprint = SprintSel::All;
             let issues = desk.effective_issues();
@@ -274,6 +310,12 @@ pub fn data(desk: &mut Desk, req: &Request) -> Result<Response> {
             };
             let mut out: Vec<SprintTotal> = Vec::new();
             for sp in desk.sprints() {
+                if let Some(c) = &chosen
+                    && !c.ids().is_empty()
+                    && !c.has(sp.id)
+                {
+                    continue;
+                }
                 let (issues, points, unpointed) =
                     total(&|i: &Issue| i.sprints.iter().any(|s| s.id == sp.id));
                 // Closed sprints only when the filters leave something in them.
@@ -296,20 +338,42 @@ pub fn data(desk: &mut Desk, req: &Request) -> Result<Response> {
                     unpointed,
                 });
             }
-            let (issues, points, unpointed) =
-                total(&|i: &Issue| !i.sprints.iter().any(|s| s.state != SprintState::Closed));
-            out.push(SprintTotal {
-                id: None,
-                name: "Backlog".into(),
-                state: "backlog".into(),
-                start: None,
-                end: None,
-                issues,
-                points,
-                unpointed,
-            });
+            let several = chosen.as_ref().map_or(0, |c| c.ids().len());
+            if several > 1 {
+                // The chosen sprints together: an issue carried across them counts once.
+                let c = chosen.clone().expect("chosen");
+                let (issues, points, unpointed) =
+                    total(&|i: &Issue| i.sprints.iter().any(|s| c.has(s.id)));
+                out.push(SprintTotal {
+                    id: None,
+                    name: "Together".into(),
+                    state: "together".into(),
+                    start: None,
+                    end: None,
+                    issues,
+                    points,
+                    unpointed,
+                });
+            } else if chosen.as_ref().is_none_or(|c| c.ids().is_empty()) {
+                let (issues, points, unpointed) =
+                    total(&|i: &Issue| !i.sprints.iter().any(|s| s.state != SprintState::Closed));
+                out.push(SprintTotal {
+                    id: None,
+                    name: "Backlog".into(),
+                    state: "backlog".into(),
+                    start: None,
+                    end: None,
+                    issues,
+                    points,
+                    unpointed,
+                });
+            }
             Response::ok(
-                format!("{} sprints and the backlog", out.len() - 1),
+                if several > 1 {
+                    format!("{several} sprints, and together")
+                } else {
+                    format!("{} sprints and the backlog", out.len().saturating_sub(1))
+                },
                 serde_json::to_value(out)?,
             )
         }
@@ -317,7 +381,7 @@ pub fn data(desk: &mut Desk, req: &Request) -> Result<Response> {
             let Some(raw) = desk.issue(key) else {
                 bail!("{key} is not in the local copy");
             };
-            let issue = desk.queue.effective(raw);
+            let issue = desk.effective(raw);
             let local = desk.sidecar.local(key);
             let shown = Shown {
                 description_text: crate::adf::to_text(&issue.description),
@@ -380,6 +444,76 @@ pub fn data(desk: &mut Desk, req: &Request) -> Result<Response> {
             } else {
                 Response::ok(format!("{key}: no change"), Value::Null)
             }
+        }
+        Request::Requests { key, all } => {
+            if let Some(k) = key {
+                known(desk, k)?;
+            }
+            let rows: Vec<RequestRow> = desk
+                .requests
+                .all()
+                .iter()
+                .filter(|r| key.as_ref().is_none_or(|k| &r.key == k))
+                .filter(|r| *all || r.state.is_open())
+                .map(|r| RequestRow {
+                    summary: desk.issue(&r.key).map(|i| i.summary.clone()),
+                    what: r.want.describe(),
+                    status: if r.changed {
+                        format!("{} · changed in Jira, confirm if done", r.state.word())
+                    } else {
+                        r.state.word().to_string()
+                    },
+                    request: r.clone(),
+                })
+                .collect();
+            Response::ok(
+                format!(
+                    "{} request{}{}",
+                    rows.len(),
+                    if rows.len() == 1 { "" } else { "s" },
+                    if *all { "" } else { " open" }
+                ),
+                serde_json::to_value(rows)?,
+            )
+        }
+        Request::RequestAdd { key, kind, value } => {
+            known(desk, key)?;
+            let want = crate::requests::parse_want(kind, std::slice::from_ref(value))?;
+            let id = desk.add_request(key, want)?;
+            let r = desk.requests.get(id).cloned().expect("just added");
+            Response::ok(
+                format!("Request {}", r.describe()),
+                serde_json::to_value(&r)?,
+            )
+        }
+        Request::RequestSet {
+            id,
+            state,
+            note,
+            by,
+        } => {
+            use crate::requests::State as S;
+            let now = crate::now();
+            let by = by.clone().unwrap_or_else(|| "you".to_string());
+            let s = match state.to_lowercase().as_str() {
+                "handed" | "handed-off" | "handoff" => S::HandedOff { to: by, at: now },
+                "done" | "confirm" | "confirmed" => S::Confirmed { at: now, by },
+                "open" | "reopen" => S::Open,
+                "drop" | "dropped" => S::Dropped { at: now },
+                other => bail!("no request state {other:?} (handed, done, open, drop)"),
+            };
+            let r = desk.requests.set_state(*id, s, note.as_deref())?;
+            Response::ok(
+                format!("Request {}: {}", r.describe(), r.state.word()),
+                serde_json::to_value(&r)?,
+            )
+        }
+        Request::RequestPrompt { id } => {
+            let Some(r) = desk.requests.get(*id) else {
+                bail!("no request #{id}");
+            };
+            let text = crate::requests::agent_prompt(r, &jdesk_command(desk));
+            Response::ok(text.clone(), Value::String(text))
         }
         Request::Star { key, on } => {
             known(desk, key)?;
@@ -503,6 +637,133 @@ fn person(desk: &Desk, want: &str) -> Result<Option<Person>> {
     }
 }
 
+/// `blocks ABC-9`, `is blocked by ABC-9`: one of the site's link phrases (a unique start of one
+/// will do), then the other issue.
+fn parse_link(desk: &Desk, key: &str, text: &str) -> Result<Edit> {
+    let Some((how, other)) = text.trim().rsplit_once(char::is_whitespace) else {
+        bail!("say how and to which issue: link blocks ABC-9");
+    };
+    let other = other.to_uppercase();
+    if !crate::model::is_issue_key(&other) {
+        bail!("“{other}” isn't an issue key: link blocks ABC-9");
+    }
+    if other.eq_ignore_ascii_case(key) {
+        bail!("an issue can't link to itself");
+    }
+    let how = how.trim().to_lowercase();
+    // Every phrase, each way: (phrase, type name, this issue is the inward one).
+    let phrases: Vec<(String, String, bool)> = desk
+        .link_types
+        .iter()
+        .flat_map(|t| {
+            [
+                (t.outward.to_lowercase(), t.name.clone(), true),
+                (t.inward.to_lowercase(), t.name.clone(), false),
+            ]
+        })
+        .collect();
+    let exact: Vec<&(String, String, bool)> = phrases.iter().filter(|p| p.0 == how).collect();
+    let found = if exact.is_empty() {
+        let starts: Vec<&(String, String, bool)> =
+            phrases.iter().filter(|p| p.0.starts_with(&how)).collect();
+        match starts.as_slice() {
+            [one] => *one,
+            [] => {
+                let mut names: Vec<&str> = phrases.iter().map(|p| p.0.as_str()).collect();
+                names.dedup();
+                bail!("no link “{how}” on this site: {}", names.join(", "))
+            }
+            many => bail!(
+                "“{how}” could be {}",
+                many.iter()
+                    .map(|p| p.0.as_str())
+                    .collect::<Vec<_>>()
+                    .join(" or ")
+            ),
+        }
+    } else {
+        exact[0]
+    };
+    Ok(Edit::Link {
+        name: found.1.clone(),
+        relation: found.0.clone(),
+        outward: found.2,
+        other_summary: desk
+            .issue(&other)
+            .map(|i| i.summary.clone())
+            .unwrap_or_default(),
+        other,
+    })
+}
+
+/// A new parent for `key`: an epic, for issues that sit under one. Sub-tasks, epics and
+/// anything that would change an issue's type move through Jira's Move: a request instead.
+fn parse_parent(desk: &Desk, key: &str, to: &str) -> Result<Edit> {
+    let to = to.to_uppercase();
+    if matches!(to.as_str(), "NONE" | "-" | "") {
+        bail!(
+            "taking a parent away isn't something Jira Desk does yet: make it a request (jdesk request add {key} other …)"
+        );
+    }
+    if !crate::model::is_issue_key(&to) {
+        bail!("“{to}” isn't an issue key");
+    }
+    if to.eq_ignore_ascii_case(key) {
+        bail!("an issue can't be its own parent");
+    }
+    let me = desk.issue(key).context("not in the local copy")?;
+    let kind = me.kind.to_lowercase();
+    if kind.contains("sub") {
+        bail!(
+            "{key} is a sub-task: Jira moves sub-tasks to another parent through its Move screen. Make it a request: jdesk request add {key} parent {to}"
+        );
+    }
+    if kind == "epic" {
+        bail!(
+            "{key} is an epic: its parent would be a level above (Premium plans). Do it in Jira, or make it a request: jdesk request add {key} parent {to}"
+        );
+    }
+    let target = desk.issue(&to);
+    if let Some(t) = target
+        && !t.kind.eq_ignore_ascii_case("epic")
+    {
+        bail!(
+            "{to} is a {}, not an epic: a {} sits under an epic. Moving it under anything else changes its type, through Jira's Move: make it a request (jdesk request add {key} parent {to})",
+            t.kind,
+            me.kind
+        );
+    }
+    Ok(Edit::Parent {
+        summary: target.map(|t| t.summary.clone()).unwrap_or_default(),
+        to,
+    })
+}
+
+/// How an agent should run `jdesk` for this data folder: plain, `--demo`, or `--data-dir`.
+fn jdesk_command(desk: &Desk) -> String {
+    let default = crate::config::data_dir(None);
+    if desk.is_demo() {
+        "jdesk --demo".into()
+    } else if desk.dir == default {
+        "jdesk".into()
+    } else {
+        format!("jdesk --data-dir '{}'", desk.dir.display())
+    }
+}
+
+/// A request with what it's about, for `jdesk requests` and list_requests.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct RequestRow {
+    #[serde(flatten)]
+    pub request: crate::requests::Request,
+    /// The issue's summary, from Jira.
+    pub summary: Option<String>,
+    /// One line: `parent → DEMO-5`.
+    pub what: String,
+    /// Where it stands, for people.
+    pub status: String,
+}
+
 /// The filter `list` and `sprints` share: an assignee, label, tag and text, done issues kept.
 fn filter_for(
     desk: &Desk,
@@ -566,12 +827,23 @@ pub struct SprintTotal {
     pub unpointed: usize,
 }
 
+/// `active`, `backlog`, `all`, or sprints by name or id, several separated by commas
+/// (`44,45`, `Sprint 44, Sprint 45`).
 fn parse_sprint_sel(desk: &Desk, s: &str) -> Result<SprintSel> {
-    Ok(match s.to_lowercase().as_str() {
+    Ok(match s.trim().to_lowercase().as_str() {
         "active" => SprintSel::Active,
         "backlog" => SprintSel::Backlog,
         "all" => SprintSel::All,
-        _ => SprintSel::Id(sprint(desk, s, true)?.id),
+        _ => {
+            let mut ids = std::collections::BTreeSet::new();
+            for part in s.split(',').map(str::trim).filter(|p| !p.is_empty()) {
+                ids.insert(sprint(desk, part, true)?.id);
+            }
+            if ids.is_empty() {
+                bail!("no sprint given");
+            }
+            SprintSel::from_ids(ids)
+        }
     })
 }
 
@@ -661,8 +933,16 @@ pub fn parse_change(desk: &Desk, key: &str, field: &str, value: &[String]) -> Re
             need("comment")?;
             Edit::Comment { text }
         }
+        "link" => {
+            need("link (how, then the issue: link blocks ABC-9)")?;
+            parse_link(desk, key, &text)?
+        }
+        "parent" | "epic" => {
+            need("parent (an epic's key)")?;
+            parse_parent(desk, key, text.trim())?
+        }
         other => bail!(
-            "can't change “{other}”: status, assign, summary, points, priority, labels, sprint or comment"
+            "can't change “{other}”: status, assign, summary, points, priority, labels, sprint, comment, link or parent"
         ),
     })
 }
@@ -842,6 +1122,7 @@ mod tests {
         let sprints = data(
             &mut desk,
             &Request::Sprints {
+                sprint: None,
                 assignee: None,
                 label: None,
                 tag: None,
@@ -879,6 +1160,7 @@ mod tests {
         let mine = data(
             &mut desk,
             &Request::Sprints {
+                sprint: None,
                 assignee: Some("me".into()),
                 label: None,
                 tag: None,
@@ -890,6 +1172,89 @@ mod tests {
         let all: usize = rows.iter().map(|r| r.issues).sum();
         let narrowed: usize = mine.iter().map(|r| r.issues).sum();
         assert!(narrowed < all);
+    }
+
+    #[test]
+    fn several_sprints_list_together_and_count_each_issue_once() {
+        let (_d, mut desk) = demo();
+        let open: Vec<_> = desk
+            .sprints()
+            .into_iter()
+            .filter(|s| s.state != crate::model::SprintState::Closed)
+            .collect();
+        let both = format!("{},{}", open[0].id, open[1].id);
+        let list = data(
+            &mut desk,
+            &Request::List {
+                sprint: Some(both.clone()),
+                assignee: None,
+                label: None,
+                tag: None,
+                text: None,
+            },
+        )
+        .unwrap();
+        let listed: Vec<Row> = serde_json::from_value(list.data).unwrap();
+        let sprints = data(
+            &mut desk,
+            &Request::Sprints {
+                sprint: Some(both),
+                assignee: None,
+                label: None,
+                tag: None,
+                text: None,
+            },
+        )
+        .unwrap();
+        let rows: Vec<SprintTotal> = serde_json::from_value(sprints.data).unwrap();
+        assert_eq!(rows.len(), 3, "the two sprints and Together: {rows:?}");
+        let together = rows.last().unwrap();
+        assert_eq!(together.state, "together");
+        assert_eq!(together.issues, listed.len(), "Together is what list shows");
+        assert!(together.issues <= rows[0].issues + rows[1].issues);
+        let pts: f64 = listed.iter().filter_map(|r| r.points).sum();
+        assert_eq!(together.points, pts);
+    }
+
+    #[test]
+    fn links_and_parents_are_checked_before_they_queue() {
+        let (_d, desk) = demo();
+        let issues = desk.issues();
+        let a = issues
+            .iter()
+            .find(|i| i.kind != "Epic" && !i.kind.to_lowercase().contains("sub"))
+            .unwrap();
+        let b = issues
+            .iter()
+            .find(|i| i.key != a.key && i.kind != "Epic")
+            .unwrap();
+        let epic = issues.iter().find(|i| i.kind == "Epic").unwrap();
+        let w = |s: &str| s.split(' ').map(String::from).collect::<Vec<_>>();
+
+        // A phrase, or a unique start of one, then the issue.
+        let e = parse_change(&desk, &a.key, "link", &w(&format!("is bl {}", b.key))).unwrap();
+        assert!(
+            matches!(e, Edit::Link { ref relation, outward: false, ref name, .. }
+            if relation == "is blocked by" && name == "Blocks")
+        );
+        let e = parse_change(&desk, &a.key, "link", &w(&format!("blocks {}", b.key))).unwrap();
+        assert!(matches!(e, Edit::Link { outward: true, .. }));
+        assert!(
+            parse_change(&desk, &a.key, "link", &w(&format!("is {}", b.key))).is_err(),
+            "ambiguous"
+        );
+        assert!(parse_change(&desk, &a.key, "link", &w(&format!("eats {}", b.key))).is_err());
+        assert!(parse_change(&desk, &a.key, "link", &w(&format!("blocks {}", a.key))).is_err());
+
+        // A parent is an epic; anything else, or an epic's own parent, is a request instead.
+        assert!(matches!(
+            parse_change(&desk, &a.key, "parent", &w(&epic.key)).unwrap(),
+            Edit::Parent { ref to, .. } if *to == epic.key
+        ));
+        let not_epic = parse_change(&desk, &a.key, "parent", &w(&b.key)).unwrap_err();
+        assert!(format!("{not_epic:#}").contains("request"), "{not_epic:#}");
+        assert!(parse_change(&desk, &epic.key, "parent", &w(&a.key)).is_err());
+        assert!(parse_change(&desk, &a.key, "parent", &w("none")).is_err());
     }
 
     #[test]
@@ -993,5 +1358,30 @@ mod tests {
         assert_eq!(rows[0].key, key);
         assert_eq!(rows[0].queued, 1);
         assert_eq!(rows[0].points, Some(8.0), "the list shows the queued value");
+
+        // A queued status brings its category: a change to Done counts as done.
+        let open = desk
+            .issues()
+            .iter()
+            .find(|i| i.status_category != crate::model::StatusCategory::Done)
+            .unwrap()
+            .key
+            .clone();
+        data(
+            &mut desk,
+            &Request::Change {
+                key: open.clone(),
+                field: "status".into(),
+                value: w("done"),
+            },
+        )
+        .unwrap();
+        let e = desk
+            .effective_issues()
+            .into_iter()
+            .find(|i| i.key == open)
+            .unwrap();
+        assert_eq!(e.status, "Done");
+        assert_eq!(e.status_category, crate::model::StatusCategory::Done);
     }
 }

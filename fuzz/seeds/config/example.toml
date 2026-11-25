@@ -1,0 +1,38 @@
+# Jira Desk settings. The token is never stored here: set JIRA_API_TOKEN, or give a
+# token_command that prints it.
+
+site = "https://your-site.atlassian.net"
+api = "cloud"                 # "server" for Jira Server / Data Center (personal access token)
+email = "you@example.com"     # Cloud only: the account that owns the API token
+
+# macOS Keychain:  security add-generic-password -s jira-desk -a you@example.com -w
+token_command = "security find-generic-password -w -s jira-desk"
+
+# Which issues to keep locally. Keep it to what you work with: every refresh fetches what
+# changed in it since the last one.
+jql = "project = ABC AND (sprint in openSprints() OR sprint in futureSprints() OR updated >= -30d)"
+
+refresh_minutes = 10          # 0: refresh only when asked (Cmd-R)
+max_image_mb = 500            # images kept; past this the least recently opened go (0: no limit)
+overscroll = true             # scrolling past an end stretches and springs back, as on macOS
+auto_advance = false          # after a change from the List, go to the next issue (until set in Settings)
+
+# The status chips over the List, in order (default: Jira's three categories). A status goes to
+# the first group naming it; `category` (to_do, in_progress, done) takes the rest of that kind;
+# anything left over shows as "Other". f 1 to f 9 toggle them.
+# [[status_group]]
+# name = "Not started"
+# category = "to_do"
+# [[status_group]]
+# name = "In progress"
+# statuses = ["In Progress", "Blocked"]
+# [[status_group]]
+# name = "In review"
+# statuses = ["In Review", "QA"]
+# [[status_group]]
+# name = "Done"
+# category = "done"
+
+# Only if a field isn't found by itself:
+# [fields]
+# story_points = "customfield_10016"

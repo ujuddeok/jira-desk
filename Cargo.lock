@@ -825,18 +825,18 @@ dependencies = [
 
 [[package]]
 name = "cho-fonts"
-version = "0.1.1"
+version = "0.1.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "9ab461aa9b5fef5501e376d3803266e6f77007fa65447a9ad79972306fe068bc"
+checksum = "f44b1f618520436b099db5234420eba2fb055c4cfe340b8971e0cd857a92cfe4"
 dependencies = [
  "gpui",
 ]
 
 [[package]]
 name = "cho-layout"
-version = "0.1.1"
+version = "0.1.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "8b48ce35b7571561eedf2afc5448e116c83604792032f1a6dd2460cf8a654275"
+checksum = "a664d888b98f7fa6ad64114ba233eed926d14b510f609102e83a1d73cc751c64"
 dependencies = [
  "serde",
  "serde_json",
@@ -845,9 +845,9 @@ dependencies = [
 
 [[package]]
 name = "cho-layout-ui"
-version = "0.1.1"
+version = "0.1.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "f8f2e877740d7d750ba8532434dba5c542950b947a8759b75b3a28e644c11093"
+checksum = "041cd84ddd4628b89ce548546be32a0f75c3862d52e339cc5fc4b7dd5e9a939e"
 dependencies = [
  "cho-fonts",
  "cho-layout",
@@ -863,15 +863,15 @@ dependencies = [
 
 [[package]]
 name = "cho-metrics"
-version = "0.1.1"
+version = "0.1.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "dd6adeaeb1c2dfa52e9ca31e8453af375e8794bdbc36fac5800ea5689423fcbc"
+checksum = "3816b87568ee7a06d79eebee5e5772fe867d4a001c04f1253ac05aa18f9ca34d"
 
 [[package]]
 name = "cho-theme"
-version = "0.1.1"
+version = "0.1.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "930b6e37bf92165aa0d06e8d9230ec8d58aa688d7b587a2162510cb3a2cadb07"
+checksum = "d7863b4e3b0f56c6ef3692c2acd5ba343a8caf452e42dc9de69bacb1ffa27db2"
 dependencies = [
  "serde",
  "serde_json",
@@ -2958,6 +2958,7 @@ dependencies = [
  "schemars",
  "serde",
  "serde_json",
+ "tempfile",
  "time",
 ]
 

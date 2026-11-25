@@ -30,6 +30,16 @@ pub enum Purpose {
     Resolve(String),
     /// The command palette: run any command.
     Command,
+    /// What kind of request to add on an issue (then its words, in a prompt).
+    RequestKind(String),
+    /// How to link an issue ("blocks", "is blocked by"…), then which issue (`LinkTo`).
+    LinkHow(String),
+    /// The issue to link to, `how`.
+    LinkTo(String, String),
+    /// A new parent (an epic) for an issue.
+    Parent(String),
+    /// Which sprints the Filters pane lists (Enter shows or hides one).
+    SprintsShown,
 }
 
 impl Purpose {
@@ -37,7 +47,9 @@ impl Purpose {
     pub fn multi(&self) -> bool {
         matches!(
             self,
-            Purpose::FilterAssignee
+            Purpose::FilterSprint
+                | Purpose::SprintsShown
+                | Purpose::FilterAssignee
                 | Purpose::FilterLabel
                 | Purpose::FilterEpic
                 | Purpose::FilterStatus

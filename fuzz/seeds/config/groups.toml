@@ -1,0 +1,12 @@
+[[status_group]]
+name = "Not started"
+category = "to_do"
+[[status_group]]
+name = "In progress"
+statuses = ["In Progress", "Blocked"]
+[[status_group]]
+name = "In review"
+statuses = ["In Review", "QA"]
+[[status_group]]
+name = "Done"
+category = "done"

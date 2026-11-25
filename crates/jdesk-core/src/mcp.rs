@@ -56,7 +56,7 @@ fn tools() -> Vec<Tool> {
             cmd: "list",
             about: "Issues in the local copy of Jira, filtered. Each has key, summary, status, assignee, labels, epic, sprint, points, and your star, tags, note and queued-change count; the message gives the count and total story points. With no sprint given, the active sprint.",
             args: json!({ "type": "object", "properties": {
-                "sprint": { "type": "string", "description": "active, backlog, all, or a sprint name or id" },
+                "sprint": { "type": "string", "description": "active, backlog, all, or sprints by name or id (several comma-separated)" },
                 "assignee": { "type": "string", "description": "A name (or part of one), me, or none" },
                 "label": { "type": "string" },
                 "tag": { "type": "string", "description": "One of your local tags" },
@@ -69,12 +69,45 @@ fn tools() -> Vec<Tool> {
             cmd: "sprints",
             about: "Story points per sprint (active, future, and closed ones that still hold matching issues) and the backlog: issue count, total points and how many issues have no points. Filters narrow which issues count.",
             args: json!({ "type": "object", "properties": {
+                "sprint": { "type": "string", "description": "Only these sprints, by name or id, comma-separated; with several, a Together row counts each issue once" },
                 "assignee": { "type": "string", "description": "A name (or part of one), me, or none" },
                 "label": { "type": "string" },
                 "tag": { "type": "string", "description": "One of your local tags" },
                 "text": { "type": "string", "description": "Words that must all appear (key, summary, labels, epic, people)" }
             }}),
             effect: Effect::Reads,
+        },
+        Tool {
+            name: "list_requests",
+            cmd: "requests",
+            about: "Requests: things the person wants made true of issues outside Jira Desk (a description rewrite, a parent, a link, a fix version, or anything else in their words), with where each stands. Open ones by default. Do one by reading the issue (show_issue), making the change in Jira, and reporting with update_request; never apply_queue.",
+            args: json!({ "type": "object", "properties": {
+                "key": { "type": "string", "description": "Only this issue's requests" },
+                "all": { "type": "boolean", "description": "Done and dropped ones too" }
+            }}),
+            effect: Effect::Reads,
+        },
+        Tool {
+            name: "add_request",
+            cmd: "request_add",
+            about: "Record a request on an issue (local only: nothing goes to Jira). kind: description (value: what to change), parent (value: the new parent's key), link (value: the relation and key, e.g. \"blocks ABC-9\"), fix-version (value: +NAME or -NAME), other (value: words).",
+            args: json!({ "type": "object", "properties": {
+                "key": key(),
+                "kind": { "type": "string", "enum": ["description", "parent", "link", "fix-version", "other"] },
+                "value": { "type": "string" }
+            }, "required": ["key", "kind", "value"] }),
+            effect: Effect::Local,
+        },
+        Tool {
+            name: "update_request",
+            cmd: "request_set",
+            about: "Report on a request: done (you made the change in Jira), open (you couldn't: say why in the note), or handed (you're working on it). Local only. Parent, link and fix-version requests are also closed by Jira Desk itself when its next sync sees the change.",
+            args: json!({ "type": "object", "properties": {
+                "id": { "type": "integer" },
+                "state": { "type": "string", "enum": ["done", "open", "handed"] },
+                "note": { "type": "string", "description": "What you did, or why not" }
+            }, "required": ["id", "state"] }),
+            effect: Effect::Local,
         },
         Tool {
             name: "show_issue",
@@ -103,8 +136,8 @@ fn tools() -> Vec<Tool> {
             about: "Queue a change to an issue. Nothing is sent to Jira until apply_queue (or the person applies in the app). Names are checked against what Jira has: a status, person, priority or sprint can be given by a unique part of its name.",
             args: json!({ "type": "object", "properties": {
                 "key": key(),
-                "field": { "type": "string", "enum": ["status", "assign", "summary", "points", "priority", "labels", "sprint", "comment"] },
-                "value": { "type": "array", "items": { "type": "string" }, "description": "The new value as words: [\"In Progress\"], [\"ana\"], [\"+perf\", \"-flaky\"], [\"8\"], [\"none\"]" }
+                "field": { "type": "string", "enum": ["status", "assign", "summary", "points", "priority", "labels", "sprint", "comment", "link", "parent"] },
+                "value": { "type": "array", "items": { "type": "string" }, "description": "The new value as words: [\"In Progress\"], [\"ana\"], [\"+perf\", \"-flaky\"], [\"8\"], [\"none\"]; a link as how then the issue: [\"blocks\", \"ABC-9\"]; a parent as an epic's key: [\"ABC-5\"]" }
             }, "required": ["key", "field", "value"] }),
             effect: Effect::Local,
         },
@@ -259,6 +292,10 @@ fn call_tool(
         args = json!({});
     }
     args["cmd"] = Value::String(tool.cmd.into());
+    // What an agent does to a request is recorded as the agent's.
+    if tool.cmd == "request_set" && args.get("by").is_none_or(Value::is_null) {
+        args["by"] = Value::String("agent".into());
+    }
     let req: Request = match serde_json::from_value(args) {
         Ok(r) => r,
         Err(e) => return text_result(false, &format!("bad arguments: {e}"), &Value::Null),
@@ -267,7 +304,7 @@ fn call_tool(
     // Sprint names are free text written in Jira too.
     let from_jira = matches!(
         tool.cmd,
-        "list" | "sprints" | "show" | "reviews" | "state" | "search"
+        "list" | "sprints" | "requests" | "show" | "reviews" | "state" | "search"
     );
     match exec(&req) {
         Ok(r) if from_jira && !r.data.is_null() => {

@@ -14,6 +14,14 @@ actions!(
         ShowHelp,
         /// Every command, searchable by name, with its key (⇧⌘P or Shift twice).
         ShowPalette,
+        /// Copy the text selected in the issue pane.
+        CopySelection,
+        /// Copy it with a line naming the issue and its link (as Chorong's Copy with Location).
+        CopyWithLink,
+        /// Select all the issue pane's text.
+        SelectAllText,
+        /// Auto-advance on or off, saved in prefs.json (over `auto_advance` in config.toml).
+        ToggleAutoAdvance,
         /// In the search bar: open a chip for the field word just typed, or take the
         /// highlighted value.
         SearchTab,
@@ -37,6 +45,27 @@ actions!(
         PageUp,
         Confirm,
         Toggle,
+        /// Shift-Space in Filters: every sprint from the last one chosen to the one here.
+        ToggleRange,
+        /// A request on the current issue: something to make true of it outside Jira Desk.
+        AddRequest,
+        /// The current issue's newest open request, as text for an agent (and handed off).
+        CopyRequestForAgent,
+        /// Only issues with open requests.
+        ToggleRequestsOnly,
+        /// Link the current issue to another: how, then which (queued).
+        LinkIssue,
+        /// Put the current issue under an epic (queued).
+        SetParent,
+        /// Open the current issue in a new pane to the right of the issue panes (⌘Enter).
+        OpenIssueRight,
+        /// …or below them (⌘⇧Enter).
+        OpenIssueBelow,
+        /// Choose which sprints the Filters pane lists.
+        ChooseShownSprints,
+        /// h on a sprint row in Filters: hide it there (Choose which sprints show… brings it
+        /// back).
+        HideSprintRow,
         // Filters.
         Search,
         FilterSprint,
@@ -100,3 +129,9 @@ actions!(
         InputDown,
     ]
 );
+
+/// The List's status chip N, counted from 1 in config.toml's order (`[[status_group]]`). In a
+/// keymap: `["jdesk::ToggleStatusGroup", 2]`.
+#[derive(Clone, PartialEq, Debug, serde::Deserialize, schemars::JsonSchema, gpui::Action)]
+#[action(namespace = jdesk)]
+pub struct ToggleStatusGroup(pub usize);

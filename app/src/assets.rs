@@ -22,7 +22,6 @@ const ICONS: &[(&str, &[u8])] = icons![
     "kanban",
     "keyboard",
     "message-square",
-    "move",
     "refresh-cw",
     "star",
     "sticky-note",
@@ -42,12 +41,6 @@ impl AssetSource for Assets {
             .map(|(_, b)| Cow::Borrowed(*b));
         match own {
             Some(b) => Ok(Some(b)),
-            // The shell's "Move pane to…" list (w p) asks for an icon cho-layout-ui 0.1.1
-            // doesn't bundle; serve ours under its path.
-            None if path == "icons/move.svg" => Ok(ICONS
-                .iter()
-                .find(|(i, _)| *i == "move")
-                .map(|(_, b)| Cow::Borrowed(*b))),
             None => cho_layout_ui::assets::Assets.load(path),
         }
     }
